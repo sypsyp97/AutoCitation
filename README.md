@@ -1,4 +1,4 @@
-# Citation Generator
+# AutoCitation
 
 An intelligent citation assistant that helps you find relevant academic papers and generate citations in LaTeX for your text using Google's Gemini AI and arXiv integration.
 ![Citation Generator](example.png)
