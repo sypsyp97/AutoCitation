@@ -31,6 +31,10 @@ import time
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
+import asyncio
+import aiohttp
+from functools import lru_cache
+import backoff
 
 def init_clients():
     """Initialize the Google Gemini client using API key from environment variables.
@@ -77,35 +81,18 @@ def init_clients():
         logger.error(f"Failed to initialize Gemini client: {str(e)}")
         return False, None
 
-def search_arxiv(query, max_results=5):
-    """Search arXiv papers using the arXiv API.
-    
-    This function constructs and sends a request to the arXiv API to search
-    for academic papers based on the provided query. It processes the XML response
-    and formats the results into a structured format including title, authors,
-    abstract, and BibTeX entry.
-    
-    Args:
-        query (str): Search query string
-        max_results (int, optional): Maximum number of results to return. Defaults to 5.
-    
-    Returns:
-        list: List of dictionaries containing paper information:
-            - title: Paper title
-            - authors: List of author names
-            - abstract: Paper abstract
-            - url: arXiv URL
-            - pdf_url: Direct PDF URL
-            - arxiv_id: arXiv identifier
-            - bibtex_entry: Formatted BibTeX entry
-            
-    Note:
-        The function implements rate limiting by sleeping for 3 seconds between
-        batches of requests to comply with arXiv API guidelines.
-    """
+# Cache for arXiv API responses
+@lru_cache(maxsize=128)
+def _cached_arxiv_search(query_str, max_results):
+    """Cached version of arXiv search to avoid redundant API calls"""
+    return _raw_arxiv_search(query_str, max_results)
+
+@backoff.on_exception(backoff.expo,
+                     (aiohttp.ClientError, asyncio.TimeoutError),
+                     max_tries=3)
+async def _async_arxiv_search(session, query, max_results):
+    """Asynchronous arXiv paper search"""
     base_url = 'http://export.arxiv.org/api/query?'
-    
-    # Clean and encode the query properly
     cleaned_query = urllib.parse.quote(query)
     
     params = {
@@ -117,95 +104,112 @@ def search_arxiv(query, max_results=5):
     }
     
     query_url = base_url + urllib.parse.urlencode(params)
-    papers = []
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
-    try:
-        # Add headers to the request
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        request = urllib.request.Request(query_url, headers=headers)
-        
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = response.read().decode('utf-8')
-            root = ET.fromstring(data)
-            
-            ns = {
-                'atom': 'http://www.w3.org/2005/Atom',
-                'arxiv': 'http://arxiv.org/schemas/atom'
+    async with session.get(query_url, headers=headers, timeout=30) as response:
+        data = await response.text()
+        return _process_arxiv_response(data)
+
+def _process_arxiv_response(data):
+    """Process arXiv API response and extract paper information"""
+    papers = []
+    root = ET.fromstring(data)
+    ns = {
+        'atom': 'http://www.w3.org/2005/Atom',
+        'arxiv': 'http://arxiv.org/schemas/atom'
+    }
+    
+    entries = root.findall('atom:entry', ns)
+    if not entries:
+        logger.warning(f"No results found for query")
+        return []
+
+    used_keys = set()
+    
+    for entry in entries:
+        try:
+            title_elem = entry.find('atom:title', ns)
+            if title_elem is None:
+                continue
+
+            paper_info = {
+                'title': title_elem.text.strip(),
+                'authors': [author.find('atom:name', ns).text for author in entry.findall('atom:author', ns)],
+                'arxiv_id': entry.find('atom:id', ns).text.split('/')[-1],
+                'abstract': entry.find('atom:summary', ns).text.strip(),
+                'published': entry.find('atom:published', ns).text
             }
             
-            entries = root.findall('atom:entry', ns)
-            if not entries:
-                logger.warning(f"No results found for query: {query}")
-                return []
-
-            used_keys = set()
+            # Extract year and month
+            year = paper_info['published'][:4]
+            month = paper_info['published'][5:7]
             
-            for entry in entries:
-                try:
-                    title_elem = entry.find('atom:title', ns)
-                    if title_elem is None:
-                        continue
-
-                        
-                    paper_info = {
-                        'title': title_elem.text.strip(),
-                        'authors': [author.find('atom:name', ns).text for author in entry.findall('atom:author', ns)],
-                        'arxiv_id': entry.find('atom:id', ns).text.split('/')[-1],
-                        'abstract': entry.find('atom:summary', ns).text.strip(),
-                        'published': entry.find('atom:published', ns).text
-                    }
-                    
-                    # Extract year and month
-                    year = paper_info['published'][:4]
-                    month = paper_info['published'][5:7]
-                    
-                    # Format authors
-                    formatted_authors = []
-                    for author in paper_info['authors']:
-                        name_parts = author.split()
-                        if len(name_parts) > 1:
-                            last_name = name_parts[-1]
-                            first_names = ' '.join(name_parts[:-1])
-                            formatted_authors.append(f"{last_name}, {first_names}")
-                        else:
-                            formatted_authors.append(author)
-                    
-                    # Create BibTeX key
-                    if paper_info['authors']:
-                        first_author_last = paper_info['authors'][0].split()[-1].lower()
-                        second_author_initial = ''
-                        if len(paper_info['authors']) > 1:
-                            second_author_last = paper_info['authors'][1].split()[-1][0].lower()
-                            second_author_initial = second_author_last
-                        
-                        arxiv_suffix = paper_info['arxiv_id'].split('.')[-1]
-                        base_key = f"{first_author_last}{second_author_initial}{year}{month}{arxiv_suffix}"
-                        
-                        bibtex_key = base_key
-                        counter = 1
-                        while bibtex_key in used_keys:
-                            bibtex_key = f"{base_key}_{counter}"
-                            counter += 1
-                        used_keys.add(bibtex_key)
-                        
-                        bibtex_entry = f"""@article{{{bibtex_key},
+            # Format authors
+            formatted_authors = []
+            for author in paper_info['authors']:
+                name_parts = author.split()
+                if len(name_parts) > 1:
+                    last_name = name_parts[-1]
+                    first_names = ' '.join(name_parts[:-1])
+                    formatted_authors.append(f"{last_name}, {first_names}")
+                else:
+                    formatted_authors.append(author)
+            
+            # Create BibTeX key
+            if paper_info['authors']:
+                first_author_last = paper_info['authors'][0].split()[-1].lower()
+                second_author_initial = ''
+                if len(paper_info['authors']) > 1:
+                    second_author_last = paper_info['authors'][1].split()[-1][0].lower()
+                    second_author_initial = second_author_last
+                
+                arxiv_suffix = paper_info['arxiv_id'].split('.')[-1]
+                base_key = f"{first_author_last}{second_author_initial}{year}{month}{arxiv_suffix}"
+                
+                bibtex_key = base_key
+                counter = 1
+                while bibtex_key in used_keys:
+                    bibtex_key = f"{base_key}_{counter}"
+                    counter += 1
+                used_keys.add(bibtex_key)
+                
+                bibtex_entry = f"""@article{{{bibtex_key},
   title={{{paper_info['title']}}},
   author={{{' and '.join(formatted_authors)}}},
   journal={{arXiv preprint arXiv:{paper_info['arxiv_id']}}},
   year={{{year}}}
 }}"""
-                        
-                        paper_info['bibtex_key'] = bibtex_key
-                        paper_info['bibtex_entry'] = bibtex_entry
-                        papers.append(paper_info)
-                except Exception as e:
-                    logger.warning(f"Error processing paper entry: {str(e)}")
-                    continue
-            
-            return papers
-            
+                
+                paper_info['bibtex_key'] = bibtex_key
+                paper_info['bibtex_entry'] = bibtex_entry
+                papers.append(paper_info)
+        except Exception as e:
+            logger.warning(f"Error processing paper entry: {str(e)}")
+            continue
+    
+    return papers
+
+async def search_arxiv_batch(queries, max_results=5):
+    """Batch process multiple arXiv searches concurrently"""
+    async with aiohttp.ClientSession() as session:
+        tasks = [_async_arxiv_search(session, query, max_results) for query in queries]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        all_papers = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Search failed: {str(result)}")
+                continue
+            all_papers.extend(result)
+        return all_papers
+
+def search_arxiv(query, max_results=5):
+    """Search arXiv papers with caching and retry logic"""
+    try:
+        # Try cached version first
+        return _cached_arxiv_search(query, max_results)
     except Exception as e:
-        logger.error(f"Error searching arXiv: {str(e)}")
+        logger.error(f"Error in arXiv search: {str(e)}")
         return []
 
 def generate_queries(client, text, num_queries):
