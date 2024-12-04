@@ -7,7 +7,7 @@ An intelligent citation assistant that helps you find relevant academic papers a
 ## Prerequisites
 
 - Python 3.9 or higher
-- Google Gemini API key
+- Google Gemini API key (free)
 
 ## Installation
 
