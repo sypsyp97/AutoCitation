@@ -34,7 +34,7 @@ An intelligent citation assistant that helps you find relevant academic papers a
 
 ## Acknowledgements
 
-AI can be a powerful tool for generating citations, but it is important to verify the results and ensure that the citations are accurate and appropriate. This tool is intended to assist with the citation process, but it is not a substitute for careful research and review of the sources.
+AI can be a powerful tool for finding citations, but it is important to verify the results and ensure that the citations are accurate and appropriate. This tool is intended to assist with the citation process, but it is not a substitute for careful research and review of the sources.
 
 ## License
 
