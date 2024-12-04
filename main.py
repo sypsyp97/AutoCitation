@@ -74,6 +74,15 @@ class CitationGeneratorUI:
         self.root.title("AutoCitation")
         self.root.geometry("1200x800")  # Set a reasonable default size
 
+        # Initialize undo history stacks
+        self.input_history = []
+        self.cited_history = []
+        self.bibtex_history = []
+        self.input_redo = []
+        self.cited_redo = []
+        self.bibtex_redo = []
+        self.max_history = 50  # Maximum number of undo steps
+
         # Initialize thread pool for background tasks
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.task_queue = queue.Queue()
@@ -157,6 +166,9 @@ class CitationGeneratorUI:
 
         self.input_text = ctk.CTkTextbox(input_frame, height=200)
         self.input_text.pack(fill=ctk.BOTH, expand=True)
+        self.input_text.bind('<KeyRelease>', lambda e: self.on_text_change(self.input_text, self.input_history, self.input_redo))
+        self.input_text.bind('<Control-z>', lambda e: self.undo_text(self.input_text, self.input_history, self.input_redo))
+        self.input_text.bind('<Control-Shift-Z>', lambda e: self.redo_text(self.input_text, self.input_history, self.input_redo))
 
         # Create the settings frame for controls
         settings_frame = ctk.CTkFrame(main_frame)
@@ -208,6 +220,9 @@ class CitationGeneratorUI:
         # Add text area and copy button for cited text
         self.cited_text = ctk.CTkTextbox(cited_frame)
         self.cited_text.pack(fill=ctk.BOTH, expand=True)
+        self.cited_text.bind('<KeyRelease>', lambda e: self.on_text_change(self.cited_text, self.cited_history, self.cited_redo))
+        self.cited_text.bind('<Control-z>', lambda e: self.undo_text(self.cited_text, self.cited_history, self.cited_redo))
+        self.cited_text.bind('<Control-Shift-Z>', lambda e: self.redo_text(self.cited_text, self.cited_history, self.cited_redo))
 
         copy_cited_btn = ctk.CTkButton(cited_frame, text="Copy", command=lambda: self.copy_text(self.cited_text))
         copy_cited_btn.pack(pady=5)
@@ -222,6 +237,9 @@ class CitationGeneratorUI:
         # Add text area and copy button for BibTeX entries
         self.bibtex_text = ctk.CTkTextbox(bibtex_frame)
         self.bibtex_text.pack(fill=ctk.BOTH, expand=True)
+        self.bibtex_text.bind('<KeyRelease>', lambda e: self.on_text_change(self.bibtex_text, self.bibtex_history, self.bibtex_redo))
+        self.bibtex_text.bind('<Control-z>', lambda e: self.undo_text(self.bibtex_text, self.bibtex_history, self.bibtex_redo))
+        self.bibtex_text.bind('<Control-Shift-Z>', lambda e: self.redo_text(self.bibtex_text, self.bibtex_history, self.bibtex_redo))
 
         copy_bibtex_btn = ctk.CTkButton(bibtex_frame, text="Copy", command=lambda: self.copy_text(self.bibtex_text))
         copy_bibtex_btn.pack(pady=5)
@@ -317,6 +335,45 @@ class CitationGeneratorUI:
         self.task_queue.put(
             lambda: asyncio.run(self._process_text_async())
         )
+
+    def on_text_change(self, text_widget, history_stack, redo_stack):
+        """Handle text changes and update the undo history."""
+        current_text = text_widget.get("1.0", ctk.END).rstrip()
+        if not history_stack or current_text != history_stack[-1]:
+            history_stack.append(current_text)
+            if len(history_stack) > self.max_history:
+                history_stack.pop(0)
+            # Clear redo stack when new changes are made
+            redo_stack.clear()
+
+    def undo_text(self, text_widget, history_stack, redo_stack, event=None):
+        """Perform undo operation on the given text widget."""
+        if len(history_stack) > 1:
+            # Move current state to redo stack
+            current_state = history_stack.pop()
+            redo_stack.append(current_state)
+            # Get previous state
+            previous_text = history_stack[-1]
+            # Update text widget without triggering the change event
+            text_widget.unbind('<KeyRelease>')
+            text_widget.delete("1.0", ctk.END)
+            text_widget.insert("1.0", previous_text)
+            text_widget.bind('<KeyRelease>', lambda e: self.on_text_change(text_widget, history_stack, redo_stack))
+        return "break"  # Prevent the event from propagating
+
+    def redo_text(self, text_widget, history_stack, redo_stack, event=None):
+        """Perform redo operation on the given text widget."""
+        if redo_stack:
+            # Get the state to redo
+            redo_state = redo_stack.pop()
+            # Add it to the history stack
+            history_stack.append(redo_state)
+            # Update text widget without triggering the change event
+            text_widget.unbind('<KeyRelease>')
+            text_widget.delete("1.0", ctk.END)
+            text_widget.insert("1.0", redo_state)
+            text_widget.bind('<KeyRelease>', lambda e: self.on_text_change(text_widget, history_stack, redo_stack))
+        return "break"  # Prevent the event from propagating
 
     def run(self):
         """Start the application"""
