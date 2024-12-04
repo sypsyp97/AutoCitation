@@ -38,4 +38,4 @@ AI can be a powerful tool for finding citations, but it is important to verify t
 
 ## License
 
-This project is open source and available under the MIT License.
+This project is open source and available under the GNU General Public License v3.0 (GPLv3) License.
