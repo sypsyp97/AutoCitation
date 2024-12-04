@@ -14,7 +14,7 @@ An intelligent citation assistant that helps you find relevant academic papers a
 1. Clone this repository
 2. Install the required dependencies:
    ```bash
-   pip install customtkinter pyperclip google-generativeai python-dotenv loguru tqdm
+   pip install -r requirements.txt
    ```
 3. Create a `.env` file in the root directory and add your Gemini API key:
    ```
