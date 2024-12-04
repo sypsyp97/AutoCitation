@@ -22,18 +22,14 @@ Dependencies:
 
 import os
 from loguru import logger
-import sys
 from dotenv import load_dotenv
 import google.generativeai as genai
-from tqdm import tqdm
 import json
-import time
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 import asyncio
 import aiohttp
-from functools import lru_cache
 import backoff
 
 def init_clients():
@@ -81,15 +77,7 @@ def init_clients():
         logger.error(f"Failed to initialize Gemini client: {str(e)}")
         return False, None
 
-# Cache for arXiv API responses
-@lru_cache(maxsize=128)
-def _cached_arxiv_search(query_str, max_results):
-    """Cached version of arXiv search to avoid redundant API calls"""
-    return _raw_arxiv_search(query_str, max_results)
-
-@backoff.on_exception(backoff.expo,
-                     (aiohttp.ClientError, asyncio.TimeoutError),
-                     max_tries=3)
+@backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError), max_tries=3)
 async def _async_arxiv_search(session, query, max_results):
     """Asynchronous arXiv paper search"""
     base_url = 'http://export.arxiv.org/api/query?'
@@ -109,6 +97,7 @@ async def _async_arxiv_search(session, query, max_results):
     async with session.get(query_url, headers=headers, timeout=30) as response:
         data = await response.text()
         return _process_arxiv_response(data)
+
 
 def _process_arxiv_response(data):
     """Process arXiv API response and extract paper information"""
@@ -203,15 +192,6 @@ async def search_arxiv_batch(queries, max_results=5):
             all_papers.extend(result)
         return all_papers
 
-def search_arxiv(query, max_results=5):
-    """Search arXiv papers with caching and retry logic"""
-    try:
-        # Try cached version first
-        return _cached_arxiv_search(query, max_results)
-    except Exception as e:
-        logger.error(f"Error in arXiv search: {str(e)}")
-        return []
-
 def generate_queries(client, text, num_queries):
     """Generate search queries using Google Gemini model.
     
@@ -272,90 +252,3 @@ def generate_queries(client, text, num_queries):
     except Exception as e:
         logger.error(f"Error generating queries: {str(e)}")
         return ["CBCT reconstruction deep learning"]  # Fallback query based on the example text
-
-def run_test(citations_per_query, num_queries):
-    """Main function to run the citation generation process."""
-    if citations_per_query < 1 or num_queries < 1:
-        logger.error("Invalid input: citations_per_query and num_queries must be positive integers")
-        return
-
-    success, client = init_clients()
-    if not success:
-        logger.error("Client initialization failed, exiting...")
-        return
-    
-    logger.info("Client initialization successful, proceeding with main process...")
-    
-    test_text = """This study addresses the challenge of applying analytical methods for Cone Beam Computed Tomography (CBCT) reconstructions along arbitrary trajectories instead of iterative methods. Traditional analytical methods like Filtered Back Projection (FBP) often fail to adequately process CBCT images due to the intricate and varied paths involved. Although iterative methods are a common solution, they require substantial computational time and resources. To address these challenges, this paper proposes two approaches, the first approach enhances the traditional FBP algorithm by using deep learning to train an optimized filter before reconstruction. The second approach improves upon the Backprojection then Filtering (BPF) algorithm by first reconstructing and then applying a deep learning-trained filter. Both methods significantly optimize the initial reconstruction results and enhance efficiency, offering promising improvements over existing iterative reconstruction techniques."""
-    
-    logger.info("Step 1: Extracting queries from text...")
-    queries = generate_queries(client, test_text, num_queries)
-    if not queries:
-        logger.error("Failed to generate queries, exiting...")
-        return
-    
-    logger.info("Step 2: Starting paper search...")
-    all_papers = []
-    
-    for query in tqdm(queries, desc="Searching queries"):
-        papers = search_arxiv(query, max_results=citations_per_query)
-        if papers:
-            logger.info(f"Found {len(papers)} papers for query: {query}")
-            all_papers.extend(papers)
-            for paper in papers:
-                logger.info(f"Found paper: {paper['title']} with key {paper['bibtex_key']}")
-            time.sleep(3)  # Rate limiting
-    
-    if not all_papers:
-        logger.error("No papers found. Stopping process.")
-        return
-    
-    logger.info("Step 3: Generating citations in text...")
-    system_prompt = """You are a LaTeX citation assistant. Add \\cite{} commands to appropriate places in the text.
-    Place citations at relevant points where the text discusses related concepts. All papers must be cited.
-    Only add \\cite{} commands, do not modify the original text."""
-    
-    user_prompt = f"Text to add citations to:\n\n{test_text}\n\nAvailable papers:\n{json.dumps(all_papers, indent=2)}"
-    full_prompt = f"{system_prompt}\n\n{user_prompt}"
-    
-    try:
-        response = client.generate_content(full_prompt)
-        cited_text = response.text
-        print("\nGenerated citations:")
-        print(cited_text)
-        
-        # Save outputs to files
-        with open('output_text.txt', 'w', encoding='utf-8') as f:
-            f.write(cited_text)
-        logger.info("Saved cited text to output_text.txt")
-        
-        logger.info("Step 4: Generating BibTeX entries...")
-        bibtex_entries = []
-        for paper in all_papers:
-            print(paper['bibtex_entry'])
-            bibtex_entries.append(paper['bibtex_entry'])
-        
-        with open('references.bib', 'w', encoding='utf-8') as f:
-            f.write('\n\n'.join(bibtex_entries))
-        logger.info("Saved BibTeX entries to references.bib")
-        
-    except Exception as e:
-        logger.error(f"Error generating citations: {str(e)}")
-
-# if __name__ == "__main__":
-#     logger.info("Starting citation generation process...")
-#     try:
-#         citations_wanted = int(input("Enter the number of citations you want per query (minimum 1): "))
-#         num_queries = int(input("Enter the number of search queries to generate (minimum 1): "))
-        
-#         if citations_wanted < 1 or num_queries < 1:
-#             raise ValueError("Both values must be positive integers")
-            
-#         run_test(citations_per_query=citations_wanted, num_queries=num_queries)
-#         logger.info("Process completed successfully")
-#     except ValueError as e:
-#         logger.error(f"Invalid input: {str(e)}")
-#         sys.exit(1)
-#     except Exception as e:
-#         logger.error(f"Process failed with error: {str(e)}")
-#         sys.exit(1)

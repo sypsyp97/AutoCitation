@@ -23,9 +23,8 @@ Example:
 
 import customtkinter as ctk
 import pyperclip
-from utils import init_clients, generate_queries, search_arxiv, search_arxiv_batch
+from utils import init_clients, generate_queries, search_arxiv_batch
 import json
-import time
 from loguru import logger
 import asyncio
 import queue
@@ -72,11 +71,11 @@ class CitationGeneratorUI:
 
         # Create the main window
         self.root = ctk.CTk()
-        self.root.title("Citation Generator")
+        self.root.title("AutoCitation")
         self.root.geometry("1200x800")  # Set a reasonable default size
 
         # Initialize thread pool for background tasks
-        self.executor = ThreadPoolExecutor(max_workers=3)
+        self.executor = ThreadPoolExecutor(max_workers=4)
         self.task_queue = queue.Queue()
         
         # Start background worker
