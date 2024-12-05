@@ -5,24 +5,21 @@
 
 > AI-powered academic citation generator using arXiv and Gemini
 
-AutoCitation automatically analyzes your text content and generates relevant academic citations from arXiv using Google's `gemini-1.5-flash` model.
+AutoCitation automatically analyzes your text content and generates relevant academic citations from arXiv using Google `gemini-1.5-flash` and `glm-4-flash` from ZhipuAI. It then integrates the citations into your text using LaTeX `\cite{}` citation commands and return the cooresponding BibTeX entries.
+
+`glm-4-flash` can be basically used without any limits for free, so it is really suitable for generating searching queries. `gemini-1.5-flash` is also free but with some limits, so it is good for generating contents with suitable citations.
+
+## 🎉 Demo
 
 ![AutoCitation Demo](example.gif)
-
-## ✨ Features
-
-- 🤖 Powered by Google's Gemini 1.5 Flash model
-- 📄 Automatic paper discovery on arXiv
-- 📝 BibTeX formatted citations
-- 🌐 Easy-to-use web interface
-- ⚡ Real-time citation generation
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 
 - Python 3.9 or higher
-- Google Gemini API key (free)
+- [Google Gemini API key](https://ai.google.dev/)
+- [ZhipuAI API key](https://bigmodel.cn/)
 
 ### Installation
 
@@ -33,10 +30,11 @@ AutoCitation automatically analyzes your text content and generates relevant aca
     pip install -r requirements.txt
     ```
 
-3. Create a `.env` file in the project root and add your Gemini API key:
+3. Create a `.env` file in the project root and add your API keys:
 
     ```bash
-    GEMINI_API_KEY=your_api_key_here
+    GEMINI_API_KEY=your_gemini_api_key_here
+    ZHIPUAI_API_KEY=your_zhipuai_api_key_here
     ```
 
 ## Usage

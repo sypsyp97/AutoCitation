@@ -9,3 +9,4 @@ google-generativeai>=0.3.0
 pyperclip>=1.8.2
 tqdm>=4.66.0
 backoff>=2.2.1
+zhipuai>=0.2.0

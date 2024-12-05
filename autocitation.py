@@ -1,9 +1,3 @@
-"""AutoCitation: A tool for automatic paper citation generation.
-
-This module provides functionality to generate academic paper citations using ArXiv
-and integrate them into text using LaTeX citation commands.
-"""
-
 # Standard library imports
 import asyncio
 import json
@@ -22,6 +16,8 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
 from loguru import logger
 from typing import Dict, List, Optional
+import google.generativeai as genai
+from zhipuai import ZhipuAI
 
 load_dotenv()
 
@@ -31,6 +27,7 @@ class Config:
     
     Attributes:
         gemini_api_key: API key for Google's Gemini model.
+        zhipu_api_key: API key for ZhipuAI's GLM model.
         max_queries: Maximum number of search queries to generate.
         max_citations_per_query: Maximum number of citations per search query.
         arxiv_base_url: Base URL for ArXiv API.
@@ -38,7 +35,8 @@ class Config:
     """
     
     gemini_api_key: str
-    max_queries: int = 5
+    zhipu_api_key: str
+    max_queries: int = 20
     max_citations_per_query: int = 10
     arxiv_base_url: str = 'http://export.arxiv.org/api/query?'
     default_headers: dict = field(default_factory=lambda: {
@@ -124,81 +122,37 @@ class AsyncContextManager:
             await self._session.close()
 
 class CitationGenerator:
-    """Main class for generating citations from text using ArXiv papers.
-    
-    This class handles the end-to-end process of:
-    1. Generating search queries from input text
-    2. Searching ArXiv for relevant papers
-    3. Generating citations and BibTeX entries
-    
-    Attributes:
-        config: Configuration object containing API keys and limits
-        xml_parser: Parser for ArXiv API responses
-        async_context: Context manager for HTTP sessions
-        llm: Language model for generating queries and citations
-        query_chain: Chain for generating search queries
-        citation_chain: Chain for generating citations
-    """
+    """Main class for generating citations from text using ArXiv papers."""
     
     def __init__(self, config: Config):
-        """Initializes the citation generator.
-        
-        Args:
-            config: Configuration object containing necessary parameters
-        """
+        """Initializes the citation generator."""
         self.config = config
         self.xml_parser = ArxivXmlParser()
         self.async_context = AsyncContextManager()
+        self.zhipu_client = ZhipuAI(api_key=config.zhipu_api_key)
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
-            temperature=0.7,
+            temperature=0.5,
             google_api_key=config.gemini_api_key,
             streaming=True
         )
-        self.query_chain = self._create_query_chain()
         self.citation_chain = self._create_citation_chain()
-    
-    def _create_query_chain(self):
-        """Creates a chain for generating search queries from input text.
-        
-        Returns:
-            Chain: A LangChain chain that generates search queries.
-        """
-        query_prompt = PromptTemplate.from_template(
-            """Generate {num_queries} precise academic search queries for papers 
-            related to this text. Focus on different aspects of the content.
-            
-            Text to analyze: {text}
-            
-            Return the queries as a JSON array of strings.
-            Format example: ["query1", "query2"]
-            
-            Make each query specific and targeted to find relevant academic papers."""
-        )
-        
-        return (
-            {"text": RunnablePassthrough(), "num_queries": RunnablePassthrough()}
-            | query_prompt
-            | self.llm
-            | StrOutputParser()
-        )
-    
+
     def _create_citation_chain(self):
-        """Creates a chain for generating citations from papers.
-        
-        Returns:
-            Chain: A LangChain chain that generates LaTeX citations.
-        """
+        """Creates a chain for generating citations from papers."""
         citation_prompt = PromptTemplate.from_template(
-            """Insert citations into the text using LaTeX \\cite{{key}} commands.
-
-            Do not change the original text. The only thing to change is the citation commands.
-
+            """Insert citations into the provided text using LaTeX \\cite{{key}} commands.
+            
+            You must not alter the original wording or structure of the text beyond adding citations.
+            You must include all provided references at least once. You should place citations at suitable points in the text where they are most relevant.
+            
             Input text:
             {text}
+            
+            Available papers (cite each at least once):
+            {papers}
+            """)
 
-            Available papers (cite all at least once):
-            {papers}""")
         
         return (
             {"text": RunnablePassthrough(), "papers": RunnablePassthrough()}
@@ -208,37 +162,77 @@ class CitationGenerator:
         )
 
     async def generate_queries(self, text: str, num_queries: int) -> List[str]:
-        """Generates search queries from input text.
-        
-        Args:
-            text: Input text to generate queries from.
-            num_queries: Number of queries to generate.
-            
-        Returns:
-            List[str]: List of generated search queries.
-        """
+        """Generates search queries using GLM-4-Flash asynchronously."""
         try:
-            response = await self.query_chain.ainvoke({"text": text, "num_queries": num_queries})
-            start, end = response.find("["), response.rfind("]") + 1
-            if start >= 0 and end > start:
-                queries = json.loads(response[start:end].replace("'", '"'))
-                return [q.strip() for q in queries if isinstance(q, str)][:num_queries]
-            return [q.strip() for q in response.split("\n") if q.strip()][:num_queries]
+            # Submit async request
+            response = self.zhipu_client.chat.asyncCompletions.create(
+                model="glm-4-flash",
+                messages=[
+                    {"role": "system", "content": "You are a research assistant. Always respond with a valid JSON array of search queries."},
+                    {"role": "user", "content": f"""
+                    Generate {num_queries} diverse academic search queries based on the given text. 
+                    The queries should be concise, cover a range of subtopics or perspectives, and focus on key academic themes related to the text.
+
+                    **Requirements**:
+                    1. Return ONLY a valid JSON array of strings. 
+                    2. Strictly follow JSON syntax with no additional text, explanations, or formatting.
+                    3. Ensure the queries are unique and do not repeat similar ideas.
+
+                    **Example format**: ["query 1", "query 2", "query 3"]
+
+                    Text to analyze: {text}
+                    """}
+
+                ],
+                temperature=0.0  # Lower temperature for more consistent JSON output
+            )
+            
+            # Get task ID and wait for completion
+            task_id = response.id
+            task_status = response.task_status
+            max_retries = 10
+            retry_count = 0
+            
+            while task_status == 'PROCESSING' and retry_count < max_retries:
+                await asyncio.sleep(1)  # Wait 1 second between checks
+                result = self.zhipu_client.chat.asyncCompletions.retrieve_completion_result(id=task_id)
+                task_status = result.task_status
+                retry_count += 1
+                
+                if task_status == 'SUCCESS':
+                    try:
+                        # Try to parse the entire response as JSON first
+                        content = result.choices[0].message.content.strip()
+                        if not content.startswith('['):
+                            # If response doesn't start with [, try to find JSON array
+                            start = content.find('[')
+                            end = content.rfind(']') + 1
+                            if start >= 0 and end > start:
+                                content = content[start:end]
+                        queries = json.loads(content)
+                        if isinstance(queries, list):
+                            return [q.strip() for q in queries if isinstance(q, str)][:num_queries]
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON parsing error: {str(e)}, raw content: {content}")
+                        # Fall back to line-by-line parsing
+                        queries = [line.strip() for line in content.split('\n') 
+                                if line.strip() and not line.strip().startswith(('[', ']'))]
+                        return queries[:num_queries]
+                elif task_status == 'FAIL':
+                    logger.error(f"Async task failed: {result}")
+                    break
+            
+            if task_status == 'PROCESSING':
+                logger.error("Async task timed out")
+            
+            return ["deep learning neural networks"]
+                
         except Exception as e:
-            logger.error(f"Error generating queries: {str(e)}")
+            logger.error(f"Error generating queries with GLM-4-Flash: {str(e)}")
             return ["deep learning neural networks"]
 
     async def search_arxiv(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
-        """Searches ArXiv for papers matching a query.
-        
-        Args:
-            session: HTTP client session.
-            query: Search query string.
-            max_results: Maximum number of results to return.
-            
-        Returns:
-            List[Dict]: List of paper metadata dictionaries.
-        """
+        """Searches ArXiv for papers matching a query."""
         try:
             params = {
                 'search_query': f'all:{urllib.parse.quote(query)}',
@@ -258,23 +252,7 @@ class CitationGenerator:
             return []
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
-        """Processes input text to generate citations.
-        
-        This method:
-        1. Generates search queries from the input text
-        2. Searches ArXiv for relevant papers
-        3. Generates citations and BibTeX entries
-        
-        Args:
-            text: Input text to process.
-            num_queries: Number of search queries to generate.
-            citations_per_query: Number of citations to generate per query.
-            
-        Returns:
-            tuple[str, str]: A tuple containing:
-                - The input text with added citations
-                - BibTeX entries for the cited papers
-        """
+        """Processes input text to generate citations."""
         num_queries = min(max(1, num_queries), self.config.max_queries)
         citations_per_query = min(max(1, citations_per_query), self.config.max_citations_per_query)
         
@@ -304,32 +282,11 @@ class CitationGenerator:
             return text, ""
 
 def create_gradio_interface(config: Config) -> gr.Interface:
-    """Creates a Gradio web interface for the citation generator.
-    
-    This function creates a web interface with:
-    - A text input area for the user's content
-    - Controls for number of queries and citations
-    - Output areas for cited text and BibTeX entries
-    
-    Args:
-        config: Configuration object for the citation generator
-        
-    Returns:
-        gr.Interface: A configured Gradio interface object
-    """
+    """Creates a Gradio web interface for the citation generator."""
     citation_gen = CitationGenerator(config)
     
     async def process(text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
-        """Processes user input and generates citations.
-        
-        Args:
-            text: User's input text
-            num_queries: Number of search queries to generate
-            citations_per_query: Number of citations per query
-            
-        Returns:
-            tuple[str, str]: Tuple of (cited text, BibTeX entries)
-        """
+        """Processes user input and generates citations."""
         if not text.strip():
             return "Please enter text to process", ""
         try:
@@ -491,16 +448,17 @@ def create_gradio_interface(config: Config) -> gr.Interface:
 
 if __name__ == "__main__":
     config = Config(
-        gemini_api_key=os.getenv("GEMINI_API_KEY")
+        gemini_api_key=os.getenv("GEMINI_API_KEY"),
+        zhipu_api_key=os.getenv("ZHIPU_API_KEY")
     )
-    if not config.gemini_api_key:
-        raise EnvironmentError("GEMINI_API_KEY not found in environment variables")
+    if not config.gemini_api_key or not config.zhipu_api_key:
+        raise EnvironmentError("GEMINI_API_KEY or ZHIPU_API_KEY not found in environment variables")
         
     demo = create_gradio_interface(config)
     try:
         demo.launch(
             server_port=7860,
-            share=True,
+            share=False,
         )
     except KeyboardInterrupt:
         print("\nShutting down server gracefully...")
