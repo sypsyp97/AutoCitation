@@ -3,7 +3,7 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-> AI-powered academic citation generator using arXiv and Gemini
+> AI-powered academic citation generator
 
 AutoCitation automatically analyzes your text content and generates relevant academic citations from arXiv using Google `gemini-1.5-flash` and `glm-4-flash` from ZhipuAI. It then integrates the citations into your text using LaTeX `\cite{}` citation commands and return the cooresponding BibTeX entries.
 
