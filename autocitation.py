@@ -1,33 +1,54 @@
-import os
-from typing import List, Dict, Optional
-from dataclasses import dataclass, field
-from dotenv import load_dotenv
-import gradio as gr
+"""AutoCitation: A tool for automatic paper citation generation.
+
+This module provides functionality to generate academic paper citations using ArXiv
+and integrate them into text using LaTeX citation commands.
+"""
+
+# Standard library imports
 import asyncio
-import aiohttp
 import json
+import os
 import urllib.parse
 import xml.etree.ElementTree as ET
-from loguru import logger
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import PromptTemplate
+# Third-party imports
+import aiohttp
+import gradio as gr
+from dataclasses import dataclass, field
+from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
+from langchain_google_genai import ChatGoogleGenerativeAI
+from loguru import logger
+from typing import Dict, List, Optional
 
 load_dotenv()
 
 @dataclass
 class Config:
-    GEMINI_API_KEY: str
-    MAX_QUERIES: int = 5
-    MAX_CITATIONS_PER_QUERY: int = 10
-    ARXIV_BASE_URL: str = 'http://export.arxiv.org/api/query?'
-    DEFAULT_HEADERS: dict = field(default_factory=lambda: {
+    """Configuration class for the citation generator.
+    
+    Attributes:
+        gemini_api_key: API key for Google's Gemini model.
+        max_queries: Maximum number of search queries to generate.
+        max_citations_per_query: Maximum number of citations per search query.
+        arxiv_base_url: Base URL for ArXiv API.
+        default_headers: Default HTTP headers for API requests.
+    """
+    
+    gemini_api_key: str
+    max_queries: int = 5
+    max_citations_per_query: int = 10
+    arxiv_base_url: str = 'http://export.arxiv.org/api/query?'
+    default_headers: dict = field(default_factory=lambda: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     })
 
-class ArxivXMLParser:
+
+class ArxivXmlParser:
+    """Parser for ArXiv API XML responses."""
+
     NS = {
         'atom': 'http://www.w3.org/2005/Atom',
         'arxiv': 'http://arxiv.org/schemas/atom'
@@ -82,29 +103,67 @@ class ArxivXMLParser:
         }}"""
 
 class AsyncContextManager:
+    """A context manager for handling async HTTP sessions.
+    
+    This class provides an async context manager interface for creating and
+    cleaning up aiohttp ClientSession objects.
+    """
+    
     async def __aenter__(self):
+        """Creates and returns a new aiohttp ClientSession.
+        
+        Returns:
+            aiohttp.ClientSession: A new HTTP client session.
+        """
         self._session = aiohttp.ClientSession()
         return self._session
         
     async def __aexit__(self, *_):
+        """Closes the HTTP client session if it exists."""
         if self._session:
             await self._session.close()
 
 class CitationGenerator:
+    """Main class for generating citations from text using ArXiv papers.
+    
+    This class handles the end-to-end process of:
+    1. Generating search queries from input text
+    2. Searching ArXiv for relevant papers
+    3. Generating citations and BibTeX entries
+    
+    Attributes:
+        config: Configuration object containing API keys and limits
+        xml_parser: Parser for ArXiv API responses
+        async_context: Context manager for HTTP sessions
+        llm: Language model for generating queries and citations
+        query_chain: Chain for generating search queries
+        citation_chain: Chain for generating citations
+    """
+    
     def __init__(self, config: Config):
+        """Initializes the citation generator.
+        
+        Args:
+            config: Configuration object containing necessary parameters
+        """
         self.config = config
-        self.xml_parser = ArxivXMLParser()
+        self.xml_parser = ArxivXmlParser()
         self.async_context = AsyncContextManager()
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
             temperature=0.7,
-            google_api_key=config.GEMINI_API_KEY,
+            google_api_key=config.gemini_api_key,
             streaming=True
         )
         self.query_chain = self._create_query_chain()
         self.citation_chain = self._create_citation_chain()
     
     def _create_query_chain(self):
+        """Creates a chain for generating search queries from input text.
+        
+        Returns:
+            Chain: A LangChain chain that generates search queries.
+        """
         query_prompt = PromptTemplate.from_template(
             """Generate {num_queries} precise academic search queries for papers 
             related to this text. Focus on different aspects of the content.
@@ -125,6 +184,11 @@ class CitationGenerator:
         )
     
     def _create_citation_chain(self):
+        """Creates a chain for generating citations from papers.
+        
+        Returns:
+            Chain: A LangChain chain that generates LaTeX citations.
+        """
         citation_prompt = PromptTemplate.from_template(
             """Insert citations into the text using LaTeX \\cite{{key}} commands.
 
@@ -144,6 +208,15 @@ class CitationGenerator:
         )
 
     async def generate_queries(self, text: str, num_queries: int) -> List[str]:
+        """Generates search queries from input text.
+        
+        Args:
+            text: Input text to generate queries from.
+            num_queries: Number of queries to generate.
+            
+        Returns:
+            List[str]: List of generated search queries.
+        """
         try:
             response = await self.query_chain.ainvoke({"text": text, "num_queries": num_queries})
             start, end = response.find("["), response.rfind("]") + 1
@@ -156,6 +229,16 @@ class CitationGenerator:
             return ["deep learning neural networks"]
 
     async def search_arxiv(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
+        """Searches ArXiv for papers matching a query.
+        
+        Args:
+            session: HTTP client session.
+            query: Search query string.
+            max_results: Maximum number of results to return.
+            
+        Returns:
+            List[Dict]: List of paper metadata dictionaries.
+        """
         try:
             params = {
                 'search_query': f'all:{urllib.parse.quote(query)}',
@@ -165,8 +248,8 @@ class CitationGenerator:
                 'sortOrder': 'descending'
             }
             async with session.get(
-                self.config.ARXIV_BASE_URL + urllib.parse.urlencode(params),
-                headers=self.config.DEFAULT_HEADERS,
+                self.config.arxiv_base_url + urllib.parse.urlencode(params),
+                headers=self.config.default_headers,
                 timeout=30
             ) as response:
                 return self.xml_parser.parse_papers(await response.text())
@@ -175,8 +258,25 @@ class CitationGenerator:
             return []
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
-        num_queries = min(max(1, num_queries), self.config.MAX_QUERIES)
-        citations_per_query = min(max(1, citations_per_query), self.config.MAX_CITATIONS_PER_QUERY)
+        """Processes input text to generate citations.
+        
+        This method:
+        1. Generates search queries from the input text
+        2. Searches ArXiv for relevant papers
+        3. Generates citations and BibTeX entries
+        
+        Args:
+            text: Input text to process.
+            num_queries: Number of search queries to generate.
+            citations_per_query: Number of citations to generate per query.
+            
+        Returns:
+            tuple[str, str]: A tuple containing:
+                - The input text with added citations
+                - BibTeX entries for the cited papers
+        """
+        num_queries = min(max(1, num_queries), self.config.max_queries)
+        citations_per_query = min(max(1, citations_per_query), self.config.max_citations_per_query)
         
         if not (queries := await self.generate_queries(text, num_queries)):
             return text, ""
@@ -204,9 +304,32 @@ class CitationGenerator:
             return text, ""
 
 def create_gradio_interface(config: Config) -> gr.Interface:
+    """Creates a Gradio web interface for the citation generator.
+    
+    This function creates a web interface with:
+    - A text input area for the user's content
+    - Controls for number of queries and citations
+    - Output areas for cited text and BibTeX entries
+    
+    Args:
+        config: Configuration object for the citation generator
+        
+    Returns:
+        gr.Interface: A configured Gradio interface object
+    """
     citation_gen = CitationGenerator(config)
     
     async def process(text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
+        """Processes user input and generates citations.
+        
+        Args:
+            text: User's input text
+            num_queries: Number of search queries to generate
+            citations_per_query: Number of citations per query
+            
+        Returns:
+            tuple[str, str]: Tuple of (cited text, BibTeX entries)
+        """
         if not text.strip():
             return "Please enter text to process", ""
         try:
@@ -309,12 +432,10 @@ def create_gradio_interface(config: Config) -> gr.Interface:
     """
 
     with gr.Blocks(css=css, theme=gr.themes.Default()) as demo:
-        gr.HTML("""
-            <div class="header">
-                <h1>📚 AutoCitation</h1>
-                <p>Make your academic writing easier with AI-powered academic citations</p>
-            </div>
-        """)
+        gr.HTML("""<div class="header">
+            <h1>📚 AutoCitation</h1>
+            <p>Make your academic writing easier with AI-powered academic citations</p>
+        </div>""")
         
         with gr.Group(elem_classes="input-group"):
             input_text = gr.Textbox(
@@ -328,7 +449,7 @@ def create_gradio_interface(config: Config) -> gr.Interface:
                         label="Search Queries",
                         value=3,
                         minimum=1,
-                        maximum=config.MAX_QUERIES,
+                        maximum=config.max_queries,
                         step=1
                     )
                 with gr.Column(scale=1):
@@ -336,7 +457,7 @@ def create_gradio_interface(config: Config) -> gr.Interface:
                         label="Citations per Query",
                         value=1,
                         minimum=1,
-                        maximum=config.MAX_CITATIONS_PER_QUERY,
+                        maximum=config.max_citations_per_query,
                         step=1
                     )
                 with gr.Column(scale=2):
@@ -370,9 +491,9 @@ def create_gradio_interface(config: Config) -> gr.Interface:
 
 if __name__ == "__main__":
     config = Config(
-        GEMINI_API_KEY=os.getenv("GEMINI_API_KEY")
+        gemini_api_key=os.getenv("GEMINI_API_KEY")
     )
-    if not config.GEMINI_API_KEY:
+    if not config.gemini_api_key:
         raise EnvironmentError("GEMINI_API_KEY not found in environment variables")
         
     demo = create_gradio_interface(config)
