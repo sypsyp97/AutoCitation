@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 import gradio as gr
@@ -10,8 +10,8 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from loguru import logger
 
-from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
@@ -28,45 +28,37 @@ class Config:
     })
 
 class ArxivXMLParser:
-    def __init__(self):
-        self.ns = {
-            'atom': 'http://www.w3.org/2005/Atom',
-            'arxiv': 'http://arxiv.org/schemas/atom'
-        }
+    NS = {
+        'atom': 'http://www.w3.org/2005/Atom',
+        'arxiv': 'http://arxiv.org/schemas/atom'
+    }
     
     def parse_papers(self, data: str) -> List[Dict]:
-        papers = []
         try:
             root = ET.fromstring(data)
-            entries = root.findall('atom:entry', self.ns)
-            used_keys = set()
-            
-            for entry in entries:
-                paper = self.parse_entry(entry, used_keys)
-                if paper:
-                    papers.append(paper)
-                    
+            return [paper for entry in root.findall('atom:entry', self.NS) 
+                   if (paper := self.parse_entry(entry))]
         except Exception as e:
             logger.error(f"Error parsing ArXiv response: {str(e)}")
-            
-        return papers
+            return []
 
-    def parse_entry(self, entry, used_keys: set) -> Optional[dict]:
+    def parse_entry(self, entry) -> Optional[dict]:
         try:
-            title = entry.find('atom:title', self.ns).text.strip()
-            authors = self._parse_authors(entry)
-            arxiv_id = entry.find('atom:id', self.ns).text.split('/')[-1]
-            published = entry.find('atom:published', self.ns).text
-            abstract = entry.find('atom:summary', self.ns).text.strip()
+            title = entry.find('atom:title', self.NS).text.strip()
+            authors = [self._format_author_name(author.find('atom:name', self.NS).text)
+                      for author in entry.findall('atom:author', self.NS)]
+            arxiv_id = entry.find('atom:id', self.NS).text.split('/')[-1]
+            year = entry.find('atom:published', self.NS).text[:4]
+            abstract = entry.find('atom:summary', self.NS).text.strip()
             
-            bibtex_key = self._generate_unique_key(authors[0], arxiv_id, used_keys)
-            bibtex_entry = self._generate_bibtex(bibtex_key, title, authors, arxiv_id, published[:4])
+            bibtex_key = f"{authors[0].split(',')[0]}{arxiv_id.replace('.', '')}"
+            bibtex_entry = self._generate_bibtex(bibtex_key, title, authors, arxiv_id, year)
             
             return {
                 'title': title,
                 'authors': authors,
                 'arxiv_id': arxiv_id,
-                'published': published,
+                'published': year,
                 'abstract': abstract,
                 'bibtex_key': bibtex_key,
                 'bibtex_entry': bibtex_entry
@@ -75,44 +67,26 @@ class ArxivXMLParser:
             logger.warning(f"Error processing paper entry: {str(e)}")
             return None
 
-    def _parse_authors(self, entry) -> List[str]:
-        return [
-            self._format_author_name(author.find('atom:name', self.ns).text)
-            for author in entry.findall('atom:author', self.ns)
-        ]
-
     @staticmethod
     def _format_author_name(author: str) -> str:
         names = author.split()
         return f"{names[-1]}, {' '.join(names[:-1])}" if len(names) > 1 else author
 
-    def _generate_unique_key(self, first_author: str, arxiv_id: str, used_keys: set) -> str:
-        base_key = f"{first_author.split()[-1]}{arxiv_id.replace('.', '')}"
-        key = base_key
-        counter = 1
-        while key in used_keys:
-            key = f"{base_key}_{counter}"
-            counter += 1
-        used_keys.add(key)
-        return key
-
-    def _generate_bibtex(self, key: str, title: str, authors: List[str], arxiv_id: str, year: str) -> str:
+    @staticmethod
+    def _generate_bibtex(key: str, title: str, authors: List[str], arxiv_id: str, year: str) -> str:
         return f"""@article{{{key},
-                title={{{title}}},
-                author={{{' and '.join(authors)}}},
-                journal={{arXiv preprint arXiv:{arxiv_id}}},
-                year={{{year}}}
-            }}"""
+            title={{{title}}},
+            author={{{' and '.join(authors)}}},
+            journal={{arXiv preprint arXiv:{arxiv_id}}},
+            year={{{year}}}
+        }}"""
 
 class AsyncContextManager:
-    def __init__(self):
-        self._session: Optional[aiohttp.ClientSession] = None
-        
     async def __aenter__(self):
         self._session = aiohttp.ClientSession()
         return self._session
         
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, *_):
         if self._session:
             await self._session.close()
 
@@ -121,18 +95,14 @@ class CitationGenerator:
         self.config = config
         self.xml_parser = ArxivXMLParser()
         self.async_context = AsyncContextManager()
-        
-        self.llm = self._initialize_llm()
-        self.query_chain = self._create_query_chain()
-        self.citation_chain = self._create_citation_chain()
-    
-    def _initialize_llm(self):
-        return ChatGoogleGenerativeAI(
+        self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
             temperature=0.7,
-            google_api_key=self.config.GEMINI_API_KEY,
+            google_api_key=config.GEMINI_API_KEY,
             streaming=True
         )
+        self.query_chain = self._create_query_chain()
+        self.citation_chain = self._create_citation_chain()
     
     def _create_query_chain(self):
         query_prompt = PromptTemplate.from_template(
@@ -175,100 +145,59 @@ class CitationGenerator:
 
     async def generate_queries(self, text: str, num_queries: int) -> List[str]:
         try:
-            system_prompt = """Generate multiple distinct search queries. Return JSON array of strings.
-            Example: ["query1", "query2", "query3"]"""
-            
-            response = await self.query_chain.ainvoke({
-                "text": f"{system_prompt}\n\nText: {text}\nNumber of queries: {num_queries}"
-            })
-            
-            try:
-                # Extract JSON array if present
-                start = response.find("[")
-                end = response.rfind("]") + 1
-                if start >= 0 and end > start:
-                    json_str = response[start:end].replace("'", '"')
-                    queries = json.loads(json_str)
-                    if isinstance(queries, list):
-                        return [q.strip() for q in queries if isinstance(q, str)][:num_queries]
-                
-                # Fallback: split by newlines
-                queries = [q.strip() for q in response.split("\n") if q.strip()]
-                return queries[:num_queries]
-            
-            except json.JSONDecodeError:
-                return [response.strip()][:num_queries]
-            
+            response = await self.query_chain.ainvoke({"text": text, "num_queries": num_queries})
+            start, end = response.find("["), response.rfind("]") + 1
+            if start >= 0 and end > start:
+                queries = json.loads(response[start:end].replace("'", '"'))
+                return [q.strip() for q in queries if isinstance(q, str)][:num_queries]
+            return [q.strip() for q in response.split("\n") if q.strip()][:num_queries]
         except Exception as e:
             logger.error(f"Error generating queries: {str(e)}")
             return ["deep learning neural networks"]
 
     async def search_arxiv(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
-        cleaned_query = urllib.parse.quote(query)
-        params = {
-            'search_query': f'all:{cleaned_query}',
-            'start': 0,
-            'max_results': max_results,
-            'sortBy': 'relevance',
-            'sortOrder': 'descending'
-        }
-        
-        query_url = self.config.ARXIV_BASE_URL + urllib.parse.urlencode(params)
-        
         try:
-            async with session.get(query_url, headers=self.config.DEFAULT_HEADERS, timeout=30) as response:
-                data = await response.text()
-                return self.xml_parser.parse_papers(data)
+            params = {
+                'search_query': f'all:{urllib.parse.quote(query)}',
+                'start': 0,
+                'max_results': max_results,
+                'sortBy': 'relevance',
+                'sortOrder': 'descending'
+            }
+            async with session.get(
+                self.config.ARXIV_BASE_URL + urllib.parse.urlencode(params),
+                headers=self.config.DEFAULT_HEADERS,
+                timeout=30
+            ) as response:
+                return self.xml_parser.parse_papers(await response.text())
         except Exception as e:
             logger.error(f"ArXiv search error: {str(e)}")
             return []
-
-    async def _gather_papers(self, session: aiohttp.ClientSession, queries: List[str], citations_per_query: int) -> List[Dict]:
-        papers = []
-        tasks = [
-            self.search_arxiv(session, query, citations_per_query)
-            for query in queries
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error(f"Search failed: {str(result)}")
-                continue
-            papers.extend(result)
-        
-        return papers
-
-    async def _generate_citations(self, text: str, papers: List[Dict]) -> str:
-        return await self.citation_chain.ainvoke({
-            "text": text,
-            "papers": json.dumps(papers, indent=2)
-        })
-
-    @staticmethod
-    def _format_bibtex_entries(papers: List[Dict]) -> str:
-        return "\n\n".join(
-            p['bibtex_entry'] for p in papers
-            if 'bibtex_entry' in p
-        )
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
         num_queries = min(max(1, num_queries), self.config.MAX_QUERIES)
         citations_per_query = min(max(1, citations_per_query), self.config.MAX_CITATIONS_PER_QUERY)
         
-        queries = await self.generate_queries(text, num_queries)
-        if not queries:
+        if not (queries := await self.generate_queries(text, num_queries)):
             return text, ""
         
         async with self.async_context as session:
-            papers = await self._gather_papers(session, queries, citations_per_query)
+            papers = []
+            results = await asyncio.gather(
+                *[self.search_arxiv(session, query, citations_per_query) for query in queries],
+                return_exceptions=True
+            )
+            papers = [p for r in results if not isinstance(r, Exception) for p in r]
             
         if not papers:
             return text, ""
         
         try:
-            cited_text = await self._generate_citations(text, papers)
-            bibtex_entries = self._format_bibtex_entries(papers)
+            cited_text = await self.citation_chain.ainvoke({
+                "text": text,
+                "papers": json.dumps(papers, indent=2)
+            })
+            bibtex_entries = "\n\n".join(p['bibtex_entry'] for p in papers if 'bibtex_entry' in p)
             return cited_text, bibtex_entries
         except Exception as e:
             logger.error(f"Citation generation error: {str(e)}")
@@ -450,7 +379,7 @@ if __name__ == "__main__":
     try:
         demo.launch(
             server_port=7860,
-            share=False,
+            share=True,
         )
     except KeyboardInterrupt:
         print("\nShutting down server gracefully...")
