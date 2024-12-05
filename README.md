@@ -7,8 +7,6 @@
 
 AutoCitation automatically analyzes your text content and generates relevant academic citations from arXiv using Google `gemini-1.5-flash` and `glm-4-flash` from ZhipuAI. It then integrates the citations into your text using LaTeX `\cite{}` citation commands and return the cooresponding BibTeX entries.
 
-`glm-4-flash` can be basically used without any limits for free, so it is really suitable for generating searching queries. `gemini-1.5-flash` is also free but with some limits, so it is good for generating contents with suitable citations.
-
 ## 🎉 Demo
 
 ![AutoCitation Demo](example.gif)
