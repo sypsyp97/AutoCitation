@@ -347,16 +347,18 @@ def create_gradio_interface(config: Config) -> gr.Interface:
             --control-bg: #F5F3F0;
         }
 
+        .container, .header, .input-group, .controls-row {
+            padding: 0.75rem;
+        }
+
         .container {
             max-width: 100%;
-            padding: 0.75rem;
             background: var(--bg);
         }
 
         .header {
             text-align: center;
             margin-bottom: 1rem;
-            padding: 0.75rem;
             background: var(--bg);
             border-bottom: 1px solid var(--border);
         }
@@ -368,63 +370,50 @@ def create_gradio_interface(config: Config) -> gr.Interface:
             margin-bottom: 0.25rem;
         }
 
-        .header p {
+        .header p, label span {
             font-size: 0.9rem;
             color: var(--text);
         }
 
         .input-group {
-            padding: 1rem;
             border-radius: 4px;
             border: 1px solid var(--border);
             margin-bottom: 0.75rem;
         }
 
         .controls-row {
-            gap: 0.75rem !important;
+            display: flex !important;
+            gap: 0.75rem;
             margin-top: 0.5rem;
         }
 
-        input[type="number"] {
-            border: 1px solid var(--border) !important;
-            border-radius: 4px !important;
-            padding: 0.5rem !important;
-            background: var(--control-bg) !important;
-            color: var(--text) !important;
-        }
-
-        textarea {
-            border: 1px solid var(--border) !important;
-            border-radius: 4px !important;
-            padding: 0.75rem !important;
-            background: var(--control-bg) !important;
-            color: var(--text) !important;
-            font-size: 0.95rem !important;
+        input[type="number"], textarea {
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.5rem;
+            background: var(--control-bg);
+            color: var(--text);
+            font-size: 0.95rem;
         }
 
         .generate-btn {
-            background: var(--primary) !important;
-            color: white !important;
-            padding: 0.5rem 1.5rem !important;
-            border-radius: 4px !important;
-            border: none !important;
-            font-size: 0.9rem !important;
-            transition: background 0.2s !important;
-            width: 100% !important;
+            background: var(--primary);
+            color: white;
+            padding: 0.5rem 1.5rem;
+            border-radius: 4px;
+            border: none;
+            font-size: 0.9rem;
+            transition: background 0.2s;
+            width: 100%;
         }
 
         .generate-btn:hover {
-            background: var(--primary-hover) !important;
+            background: var(--primary-hover);
         }
 
         .output-container {
             display: flex;
             gap: 0.75rem;
-        }
-
-        label span {
-            color: var(--text) !important;
-            font-size: 0.9rem !important;
         }
     """
 
