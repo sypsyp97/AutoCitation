@@ -20,17 +20,6 @@ load_dotenv()
 
 @dataclass
 class Config:
-    """
-    Configuration class for the citation generator.
-
-    Attributes:
-        gemini_api_key: API key for Google's Gemini model.
-        zhipu_api_key: API key for ZhipuAI's GLM model.
-        max_queries: Maximum number of search queries to generate.
-        max_citations_per_query: Maximum number of citations per search query.
-        arxiv_base_url: Base URL for ArXiv API.
-        default_headers: Default HTTP headers for API requests.
-    """
     gemini_api_key: str
     zhipu_api_key: str
     max_queries: int = 20
@@ -42,20 +31,12 @@ class Config:
 
 
 class ArxivXmlParser:
-    """
-    A parser for ArXiv API XML responses.
-    Extracts metadata for papers: title, authors, IDs, publication year,
-    abstracts, and creates BibTeX entries.
-    """
     NS = {
         'atom': 'http://www.w3.org/2005/Atom',
         'arxiv': 'http://arxiv.org/schemas/atom'
     }
 
     def parse_papers(self, data: str) -> List[Dict]:
-        """
-        Parse an ArXiv XML response and return a list of paper metadata dictionaries.
-        """
         try:
             root = ET.fromstring(data)
             papers = []
@@ -69,9 +50,6 @@ class ArxivXmlParser:
             return []
 
     def parse_entry(self, entry) -> Optional[dict]:
-        """
-        Parse a single XML entry and extract paper information.
-        """
         try:
             title_node = entry.find('atom:title', self.NS)
             if title_node is None:
@@ -113,9 +91,6 @@ class ArxivXmlParser:
 
     @staticmethod
     def _format_author_name(author: str) -> str:
-        """
-        Format author names as 'LastName, FirstName'.
-        """
         names = author.split()
         if len(names) > 1:
             return f"{names[-1]}, {' '.join(names[:-1])}"
@@ -123,9 +98,6 @@ class ArxivXmlParser:
 
     @staticmethod
     def _generate_bibtex(key: str, title: str, authors: List[str], arxiv_id: str, year: str) -> str:
-        """
-        Generate a BibTeX entry for a paper.
-        """
         return f"""@article{{{key},
             title={{{title}}},
             author={{{' and '.join(authors)}}},
@@ -135,9 +107,6 @@ class ArxivXmlParser:
 
 
 class AsyncContextManager:
-    """
-    A context manager for handling async HTTP sessions.
-    """
     async def __aenter__(self):
         self._session = aiohttp.ClientSession()
         return self._session
@@ -148,10 +117,6 @@ class AsyncContextManager:
 
 
 class CitationGenerator:
-    """
-    Main class for generating citations from ArXiv papers.
-    It uses LLMs to generate queries and insert citations into text.
-    """
     def __init__(self, config: Config):
         self.config = config
         self.xml_parser = ArxivXmlParser()
@@ -166,9 +131,6 @@ class CitationGenerator:
         self.citation_chain = self._create_citation_chain()
 
     def _create_citation_chain(self):
-        """
-        Create a chain for inserting citations into the provided text.
-        """
         citation_prompt = PromptTemplate.from_template(
             """Insert citations into the provided text using LaTeX \\cite{{key}} commands.
             
@@ -182,7 +144,6 @@ class CitationGenerator:
             {papers}
             """
         )
-
         return (
             {"text": RunnablePassthrough(), "papers": RunnablePassthrough()}
             | citation_prompt
@@ -191,10 +152,6 @@ class CitationGenerator:
         )
 
     async def generate_queries(self, text: str, num_queries: int) -> List[str]:
-        """
-        Generate search queries using ZhipuAI's model.
-        Returns a list of queries.
-        """
         try:
             response = self.zhipu_client.chat.asyncCompletions.create(
                 model="glm-4-flash",
@@ -257,10 +214,6 @@ class CitationGenerator:
             return ["deep learning neural networks"]
 
     async def search_arxiv(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
-        """
-        Search ArXiv for papers that match the query.
-        Returns a list of paper metadata dictionaries.
-        """
         try:
             params = {
                 'search_query': f'all:{urllib.parse.quote(query)}',
@@ -282,10 +235,6 @@ class CitationGenerator:
             return []
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
-        """
-        Process the input text, generate search queries, fetch papers, and insert citations.
-        Returns the cited text and BibTeX entries.
-        """
         num_queries = min(max(1, num_queries), self.config.max_queries)
         citations_per_query = min(max(1, citations_per_query), self.config.max_citations_per_query)
 
@@ -301,6 +250,15 @@ class CitationGenerator:
         for r in results:
             if not isinstance(r, Exception):
                 papers.extend(r)
+
+        # Deduplicate papers by their bibtex_key
+        unique_papers = []
+        seen_keys = set()
+        for p in papers:
+            if p['bibtex_key'] not in seen_keys:
+                seen_keys.add(p['bibtex_key'])
+                unique_papers.append(p)
+        papers = unique_papers
 
         if not papers:
             return text, ""
@@ -318,15 +276,9 @@ class CitationGenerator:
 
 
 def create_gradio_interface(config: Config) -> gr.Interface:
-    """
-    Create a Gradio interface for the citation generator.
-    """
     citation_gen = CitationGenerator(config)
 
     async def process(text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
-        """
-        Process user input text and return cited text and BibTeX entries.
-        """
         if not text.strip():
             return "Please enter text to process", ""
         try:
