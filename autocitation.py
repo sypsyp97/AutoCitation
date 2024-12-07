@@ -11,7 +11,6 @@ from loguru import logger
 
 import aiohttp
 import gradio as gr
-from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -20,8 +19,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 import bibtexparser
 from bibtexparser.bwriter import BibTexWriter
 from bibtexparser.bibdatabase import BibDatabase
-
-load_dotenv()
 
 @dataclass
 class Config:
@@ -487,14 +484,19 @@ class CitationGenerator:
             logger.error(f"Error inserting citations: {e}")  # Replace print with logger
             return text, ""
 
-def create_gradio_interface(config: Config) -> gr.Interface:
-    citation_gen = CitationGenerator(config)
-
-    async def process(text: str, num_queries: int, citations_per_query: int,
+def create_gradio_interface() -> gr.Interface:
+    # Removed CitationGenerator initialization here
+    async def process(api_key: str, text: str, num_queries: int, citations_per_query: int,
                      use_arxiv: bool, use_crossref: bool) -> tuple[str, str]:
+        if not api_key.strip():
+            return "Please enter your Gemini API Key.", ""
         if not text.strip():
             return "Please enter text to process", ""
         try:
+            config = Config(
+                gemini_api_key=api_key
+            )
+            citation_gen = CitationGenerator(config)
             return await citation_gen.process_text(
                 text, num_queries, citations_per_query,
                 use_arxiv=use_arxiv, use_crossref=use_crossref
@@ -603,6 +605,13 @@ def create_gradio_interface(config: Config) -> gr.Interface:
 </div>""")
 
         with gr.Group(elem_classes="input-group"):
+            # Added API Key input field
+            api_key = gr.Textbox(
+                label="Gemini API Key",
+                placeholder="Enter your Gemini API key...",
+                type="password",
+                interactive=True
+            )
             input_text = gr.Textbox(
                 label="Input Text",
                 placeholder="Paste or type your text here...",
@@ -614,7 +623,7 @@ def create_gradio_interface(config: Config) -> gr.Interface:
                         label="Search Queries",
                         value=3,
                         minimum=1,
-                        maximum=config.max_queries,
+                        maximum=5,  # Changed to config.max_queries as 5
                         step=1
                     )
                 with gr.Column(scale=1):
@@ -622,7 +631,7 @@ def create_gradio_interface(config: Config) -> gr.Interface:
                         label="Citations per Query",
                         value=1,
                         minimum=1,
-                        maximum=config.max_citations_per_query,
+                        maximum=10,  # Changed to config.max_citations_per_query as 10
                         step=1
                     )
             
@@ -660,22 +669,18 @@ def create_gradio_interface(config: Config) -> gr.Interface:
                         show_copy_button=True
                     )
 
+        # Updated the inputs and outputs
         process_btn.click(
             fn=process,
-            inputs=[input_text, num_queries, citations_per_query, use_arxiv, use_crossref],
+            inputs=[api_key, input_text, num_queries, citations_per_query, use_arxiv, use_crossref],
             outputs=[cited_text, bibtex]
         )
 
     return demo
 
 if __name__ == "__main__":
-    config = Config(
-        gemini_api_key=os.getenv("GEMINI_API_KEY")
-    )
-    if not config.gemini_api_key:
-        raise EnvironmentError("GEMINI_API_KEY not set.")
-
-    demo = create_gradio_interface(config)
+    # Removed environment variable loading and config initialization
+    demo = create_gradio_interface()
     try:
         demo.launch(server_port=7860, share=False)
     except KeyboardInterrupt:

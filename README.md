@@ -27,12 +27,6 @@ AutoCitation automatically analyzes your text content and generates relevant aca
     pip install -r requirements.txt
     ```
 
-3. Create a `.env` file in the project root and add your API keys:
-
-    ```bash
-    GEMINI_API_KEY=your_gemini_api_key_here
-    ```
-
 ## Usage
 
 ```bash
