@@ -5,7 +5,7 @@
 
 > AI-powered academic citation generator
 
-AutoCitation automatically analyzes your text content and generates relevant academic citations from [arXiv](https://arxiv.org/) and [CrossRef](https://www.crossref.org/) databases using Google `gemini-1.5-flash` and `glm-4-flash` from ZhipuAI. It then integrates the citations into your text using LaTeX `\cite{}` citation commands and return the cooresponding BibTeX entries.
+AutoCitation automatically analyzes your text content and generates relevant academic citations from [arXiv](https://arxiv.org/) and [CrossRef](https://www.crossref.org/) databases using Google `gemini-1.5-flash`. It then integrates the citations into your text using LaTeX `\cite{}` citation commands and return the cooresponding BibTeX entries.
 
 ## 🎉 Demo
 
@@ -17,7 +17,6 @@ AutoCitation automatically analyzes your text content and generates relevant aca
 
 - Python 3.9 or higher
 - [Google Gemini API key](https://ai.google.dev/)
-- [ZhipuAI API key](https://bigmodel.cn/)
 
 ### Installation
 
@@ -32,7 +31,6 @@ AutoCitation automatically analyzes your text content and generates relevant aca
 
     ```bash
     GEMINI_API_KEY=your_gemini_api_key_here
-    ZHIPUAI_API_KEY=your_zhipuai_api_key_here
     ```
 
 ## Usage

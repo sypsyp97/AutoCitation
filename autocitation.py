@@ -16,18 +16,20 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
-from zhipuai import ZhipuAI
+
+import bibtexparser
+from bibtexparser.bwriter import BibTexWriter
+from bibtexparser.bibdatabase import BibDatabase
 
 load_dotenv()
 
 @dataclass
 class Config:
     gemini_api_key: str
-    zhipu_api_key: str
     max_retries: int = 3
     base_delay: int = 1
-    max_queries: int = 20
-    max_citations_per_query: int = 10
+    max_queries: int = 5
+    max_citations_per_query: int = 5
     arxiv_base_url: str = 'http://export.arxiv.org/api/query?'
     crossref_base_url: str = 'https://api.crossref.org/works'
     default_headers: dict = field(default_factory=lambda: {
@@ -49,7 +51,8 @@ class ArxivXmlParser:
                 if paper:
                     papers.append(paper)
             return papers
-        except Exception:
+        except Exception as e:
+            print(f"Error parsing ArXiv XML: {e}")
             return []
 
     def parse_entry(self, entry) -> Optional[dict]:
@@ -77,7 +80,7 @@ class ArxivXmlParser:
             abstract = abstract_node.text.strip() if abstract_node is not None else ""
 
             bibtex_key = f"{authors[0].split(',')[0]}{arxiv_id.replace('.', '')}" if authors else f"unknown{arxiv_id.replace('.', '')}"
-            bibtex_entry = self._generate_bibtex(bibtex_key, title, authors, arxiv_id, year)
+            bibtex_entry = self._generate_bibtex_entry(bibtex_key, title, authors, arxiv_id, year)
 
             return {
                 'title': title,
@@ -88,7 +91,8 @@ class ArxivXmlParser:
                 'bibtex_key': bibtex_key,
                 'bibtex_entry': bibtex_entry
             }
-        except Exception:
+        except Exception as e:
+            print(f"Error parsing ArXiv entry: {e}")
             return None
 
     @staticmethod
@@ -98,14 +102,20 @@ class ArxivXmlParser:
             return f"{names[-1]}, {' '.join(names[:-1])}"
         return author
 
-    @staticmethod
-    def _generate_bibtex(key: str, title: str, authors: List[str], arxiv_id: str, year: str) -> str:
-        return f"""@article{{{key},
-            title={{{title}}},
-            author={{{' and '.join(authors)}}},
-            journal={{arXiv preprint arXiv:{arxiv_id}}},
-            year={{{year}}}
-        }}"""
+    def _generate_bibtex_entry(self, key: str, title: str, authors: List[str], arxiv_id: str, year: str) -> str:
+        db = BibDatabase()
+        db.entries = [{
+            'ENTRYTYPE': 'article',
+            'ID': key,
+            'title': title,
+            'author': ' and '.join(authors),
+            'journal': f'arXiv preprint arXiv:{arxiv_id}',
+            'year': year
+        }]
+        writer = BibTexWriter()
+        writer.indent = '    '  # Indentation for entries
+        writer.comma_first = False  # Place the comma at the end of lines
+        return writer.write(db).strip()
 
 class AsyncContextManager:
     async def __aenter__(self):
@@ -121,7 +131,6 @@ class CitationGenerator:
         self.config = config
         self.xml_parser = ArxivXmlParser()
         self.async_context = AsyncContextManager()
-        self.zhipu_client = ZhipuAI(api_key=config.zhipu_api_key)
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
             temperature=0.1,
@@ -129,6 +138,7 @@ class CitationGenerator:
             streaming=True
         )
         self.citation_chain = self._create_citation_chain()
+        self.generate_queries_chain = self._create_generate_queries_chain()
 
     def _create_citation_chain(self):
         citation_prompt = PromptTemplate.from_template(
@@ -136,10 +146,10 @@ class CitationGenerator:
             
             You must not alter the original wording or structure of the text beyond adding citations.
             You must include all provided references at least once. Place citations at suitable points.
-            
+
             Input text:
             {text}
-            
+
             Available papers (cite each at least once):
             {papers}
             """
@@ -150,59 +160,53 @@ class CitationGenerator:
             | self.llm
             | StrOutputParser()
         )
+    
+    def _create_generate_queries_chain(self):
+        generate_queries_prompt = PromptTemplate.from_template(
+            """Generate {num_queries} diverse academic search queries based on the given text.
+            The queries should be concise and relevant.
+
+            Requirements:
+            1. Return ONLY a valid JSON array of strings.
+            2. No additional text or formatting beyond JSON.
+            3. Ensure uniqueness.
+
+            Text: {text}
+            """
+        )
+        return (
+            {"text": RunnablePassthrough(), "num_queries": RunnablePassthrough()}
+            | generate_queries_prompt
+            | self.llm
+            | StrOutputParser()
+        )
 
     async def generate_queries(self, text: str, num_queries: int) -> List[str]:
         try:
-            response = self.zhipu_client.chat.asyncCompletions.create(
-                model="glm-4-flash",
-                messages=[
-                    {"role": "system", "content": "You are a research assistant. Always respond with a valid JSON array of search queries."},
-                    {"role": "user", "content": f"""
-                    Generate {num_queries} diverse academic search queries based on the given text.
-                    The queries should be concise and relevant.
-
-                    Requirements:
-                    1. Return ONLY a valid JSON array of strings.
-                    2. No additional text or formatting beyond JSON.
-                    3. Ensure uniqueness.
-
-                    Text: {text}
-                    """}
-                ],
-                temperature=0.0,
-                max_tokens=1024
-            )
-
-            task_id = response.id
-            task_status = response.task_status
-            max_retries = 10
-            retry_count = 0
-
-            while task_status == 'PROCESSING' and retry_count < max_retries:
-                await asyncio.sleep(1)
-                result = self.zhipu_client.chat.asyncCompletions.retrieve_completion_result(id=task_id)
-                task_status = result.task_status
-                retry_count += 1
-
-                if task_status == 'SUCCESS':
-                    content = result.choices[0].message.content.strip()
-                    if not content.startswith('['):
-                        start = content.find('[')
-                        end = content.rfind(']') + 1
-                        if start >= 0 and end > start:
-                            content = content[start:end]
-                    try:
-                        queries = json.loads(content)
-                        if isinstance(queries, list):
-                            return [q.strip() for q in queries if isinstance(q, str)][:num_queries]
-                    except json.JSONDecodeError:
-                        lines = [line.strip() for line in content.split('\n')
-                                if line.strip() and not line.strip().startswith(('[', ']'))]
-                        return lines[:num_queries]
+            response = await self.generate_queries_chain.ainvoke({
+                "text": text,
+                "num_queries": num_queries
+            })
+            
+            content = response.strip()
+            if not content.startswith('['):
+                start = content.find('[')
+                end = content.rfind(']') + 1
+                if start >= 0 and end > start:
+                    content = content[start:end]
+            try:
+                queries = json.loads(content)
+                if isinstance(queries, list):
+                    return [q.strip() for q in queries if isinstance(q, str)][:num_queries]
+            except json.JSONDecodeError:
+                lines = [line.strip() for line in content.split('\n')
+                        if line.strip() and not line.strip().startswith(('[', ']'))]
+                return lines[:num_queries]
 
             return ["deep learning neural networks"]
 
-        except Exception:
+        except Exception as e:
+            print(f"Error generating queries: {e}")
             return ["deep learning neural networks"]
 
     async def search_arxiv(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
@@ -221,122 +225,59 @@ class CitationGenerator:
                 timeout=30
             ) as response:
                 text_data = await response.text()
-                return self.xml_parser.parse_papers(text_data)
-        except Exception:
+                papers = self.xml_parser.parse_papers(text_data)
+                return papers
+        except Exception as e:
+            print(f"Error searching ArXiv: {e}")
             return []
 
-    async def fix_corrupted_chars(self, match, context_text: str) -> str:
-        char = match.group(0)
-        if char != '�':
-            return char
+    async def fix_author_name(self, author: str) -> str:
+        if not re.search(r'[�]', author):
+            return author
             
-        # Extract context window around corrupted character
-        start = max(0, match.start() - 50)
-        end = min(len(context_text), match.end() + 50)
-        context = context[start:end]
-        
         try:
-            prompt = f"""Analyze this text with a corrupted character (�) and determine the most likely correct character:
+            prompt = f"""Fix this author name that contains corrupted characters (�):
+
+                    Name: {author}
+
+                    Requirements:
+                    1. Return ONLY the fixed author name
+                    2. Use proper diacritical marks for names
+                    3. Consider common name patterns and languages
+                    4. If unsure about a character, use the most likely letter
+                    5. Maintain the format: "Lastname, Firstname"
+
+                    Example fixes:
+                    - "Gonz�lez" -> "González"
+                    - "Cristi�n" -> "Cristián"
+                    """
             
-            Text: {context}
+            response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
+            fixed_name = response.content.strip()
+            return fixed_name if fixed_name else author
             
-            Requirements:
-            1. Return ONLY the single replacement character
-            2. Focus on names and common character patterns
-            3. Consider language context (Spanish, etc.)
-            4. If uncertain, default to 'a'
-            """
-            
-            response = await self.llm.ainvoke([{
-                "role": "user",
-                "content": prompt
-            }])
-            
-            suggested_char = response.content.strip()
-            if len(suggested_char) == 1:
-                return suggested_char
-                
         except Exception as e:
-            print(f"Error using LLM for character fix: {str(e)}")
-        
-        # Fallback to basic rules if LLM fails
-        if 'González' in context_text:
-            return 'á'
-        elif 'Cristián' in context_text:
-            return 'á'
-        else:
-            return 'a'
+            print(f"Error fixing author name: {e}")
+            return author
 
-    async def fix_all_corrupted_chars(self, text: str) -> str:
-        """
-        Process all corrupted characters in a text string asynchronously.
-        """
-        matches = list(re.finditer(r'�', text))
-        if not matches:
+    async def format_bibtex_author_names(self, text: str) -> str:
+        try:
+            bib_database = bibtexparser.loads(text)
+            for entry in bib_database.entries:
+                if 'author' in entry:
+                    authors = entry['author'].split(' and ')
+                    cleaned_authors = []
+                    for author in authors:
+                        fixed_author = await self.fix_author_name(author)
+                        cleaned_authors.append(fixed_author)
+                    entry['author'] = ' and '.join(cleaned_authors)
+            writer = BibTexWriter()
+            writer.indent = '    '
+            writer.comma_first = False
+            return writer.write(bib_database).strip()
+        except Exception as e:
+            print(f"Error cleaning BibTeX special characters: {e}")
             return text
-            
-        # Store the original string and keep track of offset changes
-        result = text
-        offset = 0
-        
-        # Process each match one by one
-        for match in matches:
-            # Adjust match position for previous replacements
-            pos = match.start() + offset
-            fixed_char = await self.fix_corrupted_chars(match, text)
-            
-            # Replace the character and update the offset
-            result = result[:pos] + fixed_char + result[pos + 1:]
-            offset += len(fixed_char) - 1  # -1 because we're replacing one character
-            
-        return result
-
-    async def clean_bibtex_special_chars(self, text: str) -> str:
-        def process_bibtex_entry(entry):
-            if 'author = {' in entry:
-                author_start = entry.find('author = {') + len('author = {')
-                author_end = entry.find('}', author_start)
-                if author_start > -1 and author_end > -1:
-                    authors = entry[author_start:author_end]
-                    author_list = authors.split(' and ')
-                    processed_authors = []
-                    for author in author_list:
-                        processed_author = author
-                        for char, latex_cmd in latex_chars.items():
-                            processed_author = processed_author.replace(char, latex_cmd)
-                        processed_authors.append(processed_author)
-                    
-                    new_authors = ' and '.join(processed_authors)
-                    entry = entry[:author_start] + new_authors + entry[author_end:]
-            return entry
-
-        latex_chars = {
-            'á': '{\\\'a}', 'é': '{\\\'e}', 'í': '{\\\'i}', 'ó': '{\\\'o}', 'ú': '{\\\'u}',
-            'Á': '{\\\'A}', 'É': '{\\\'E}', 'Í': '{\\\'I}', 'Ó': '{\\\'O}', 'Ú': '{\\\'U}',
-            'ñ': '{\\~n}', 'Ñ': '{\\~N}',
-            'ü': '{\\"u}', 'Ü': '{\\"U}',
-            'ï': '{\\"i}', 'Ï': '{\\"I}'
-        }
-        
-        entries = text.split('@')[1:]
-        processed_entries = []
-        for entry in entries:
-            if entry.strip():
-                processed_entry = process_bibtex_entry('@' + entry)
-                processed_entries.append(processed_entry)
-        
-        result = ''.join(processed_entries)
-        
-        # Handle corrupted characters using LLM
-        result = await self.fix_all_corrupted_chars(result)
-        
-        # Convert remaining special characters
-        result = ''.join(c if c.isascii() or c.isspace() or c == '-' else 
-                      latex_chars.get(c, c) if c in latex_chars else 
-                      c if c.isspace() else c 
-                      for c in result)
-        
-        return result.strip()
 
     async def search_crossref(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
         try:
@@ -344,7 +285,7 @@ class CitationGenerator:
             if ' ' in cleaned_query:
                 cleaned_query = f'"{cleaned_query}"'
             encoded_query = urllib.parse.quote(cleaned_query)
-            
+
             params = {
                 'query.bibliographic': encoded_query,
                 'rows': max_results,
@@ -352,12 +293,12 @@ class CitationGenerator:
                 'sort': 'relevance',
                 'order': 'desc'
             }
-            
+
             headers = {
                 'User-Agent': 'Mozilla/5.0 (compatible; CitationBot/1.0; mailto:example@domain.com)',
                 'Accept': 'application/json'
             }
-            
+
             for attempt in range(self.config.max_retries):
                 try:
                     async with session.get(
@@ -368,28 +309,29 @@ class CitationGenerator:
                     ) as response:
                         if response.status == 429:
                             delay = self.config.base_delay * (2 ** attempt)
+                            print(f"Rate limited by CrossRef. Retrying in {delay} seconds...")
                             await asyncio.sleep(delay)
                             continue
-                        
+
                         response.raise_for_status()
                         search_data = await response.json()
                         items = search_data.get('message', {}).get('items', [])
-                        
+
                         if not items:
                             return []
-                        
+
                         papers = []
                         for item in items:
                             doi = item.get('DOI')
                             if not doi:
                                 continue
-                            
+
                             try:
                                 bibtex_url = f"https://doi.org/{doi}"
                                 async with session.get(
                                     bibtex_url,
                                     headers={
-                                        'Accept': 'text/bibliography; style=bibtex',
+                                        'Accept': 'application/x-bibtex',
                                         'User-Agent': 'Mozilla/5.0 (compatible; CitationBot/1.0; mailto:example@domain.com)'
                                     },
                                     timeout=30
@@ -397,51 +339,51 @@ class CitationGenerator:
                                     if bibtex_response.status != 200:
                                         continue
 
-                                    bibtex_bytes = await bibtex_response.read()
-                                    try:
-                                        bibtex_text = bibtex_bytes.decode('utf-8')
-                                    except UnicodeDecodeError:
-                                        try:
-                                            bibtex_text = bibtex_bytes.decode('latin1')
-                                        except UnicodeDecodeError:
-                                            bibtex_text = bibtex_bytes.decode('utf-8', errors='replace')
-
-                                    if not bibtex_text.strip():
-                                        continue
-
+                                    bibtex_text = await bibtex_response.text()
                                     bibtex_text = urllib.parse.unquote(bibtex_text)
                                     bibtex_text = html.unescape(bibtex_text)
                                     bibtex_text = unicodedata.normalize('NFKC', bibtex_text)
-                                    bibtex_text = await self.clean_bibtex_special_chars(bibtex_text)
+                                    bibtex_text = await self.format_bibtex_author_names(bibtex_text)
                                     bibtex_text = bibtex_text.strip()
                                     bibtex_text = re.sub(r'\s+', ' ', bibtex_text)
                                     bibtex_text = bibtex_text.replace(' @', '@')
-                                    
-                                    match = re.match(r'@(\w+)\s*{\s*([^,\s]+)\s*,', bibtex_text)
-                                    if match:
-                                        entry_type, key = match.groups()
-                                        key = re.sub(r'[^\w-]', '', key)
-                                        
-                                        bibtex_text = re.sub(r'@(\w+)\s*{\s*([^,]+),', f'@{entry_type}{{{key},', bibtex_text)
-                                        bibtex_text = re.sub(r',\s+([a-zA-Z]+)\s*=', r',\n    \1 = ', bibtex_text)
-                                        bibtex_text = re.sub(r'}\s*$', '\n}', bibtex_text)
-                                        
-                                        papers.append({
-                                            'bibtex_key': key,
-                                            'bibtex_entry': bibtex_text
-                                        })
-                            except Exception:
+
+                                    # Parse the BibTeX entry
+                                    bib_database = bibtexparser.loads(bibtex_text)
+                                    if not bib_database.entries:
+                                        continue
+                                    entry = bib_database.entries[0]
+
+                                    # Clean the BibTeX key
+                                    key = re.sub(r'[^\w-]', '', entry.get('ID', 'unknown'))
+                                    entry['ID'] = key
+
+                                    # Use BibTexWriter to format the entry
+                                    writer = BibTexWriter()
+                                    writer.indent = '    '
+                                    writer.comma_first = False
+                                    formatted_bibtex = writer.write(bib_database).strip()
+
+                                    papers.append({
+                                        'bibtex_key': key,
+                                        'bibtex_entry': formatted_bibtex
+                                    })
+                            except Exception as e:
+                                print(f"Error processing CrossRef item: {e}")
                                 continue
-                        
+
                         return papers
-                        
+
                 except aiohttp.ClientError as e:
                     if attempt == self.config.max_retries - 1:
+                        print(f"Max retries reached for CrossRef search. Error: {e}")
                         raise
                     delay = self.config.base_delay * (2 ** attempt)
+                    print(f"Client error during CrossRef search: {e}. Retrying in {delay} seconds...")
                     await asyncio.sleep(delay)
-                    
-        except Exception:
+
+        except Exception as e:
+            print(f"Error searching CrossRef: {e}")
             return []
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int,
@@ -463,7 +405,7 @@ class CitationGenerator:
                     search_tasks.append(self.search_arxiv(session, query, citations_per_query))
                 if use_crossref:
                     search_tasks.append(self.search_crossref(session, query, citations_per_query))
-            
+
             results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
         papers = []
@@ -487,9 +429,18 @@ class CitationGenerator:
                 "text": text,
                 "papers": json.dumps(papers, indent=2)
             })
-            bibtex_entries = "\n\n".join(p['bibtex_entry'] for p in papers if 'bibtex_entry' in p)
+
+            # Use bibtexparser to aggregate BibTeX entries
+            bib_database = BibDatabase()
+            bib_database.entries = [bibtexparser.loads(p['bibtex_entry']).entries[0] for p in papers if 'bibtex_entry' in p]
+            writer = BibTexWriter()
+            writer.indent = '    '
+            writer.comma_first = False
+            bibtex_entries = writer.write(bib_database).strip()
+
             return cited_text, bibtex_entries
-        except Exception:
+        except Exception as e:
+            print(f"Error inserting citations: {e}")
             return text, ""
 
 def create_gradio_interface(config: Config) -> gr.Interface:
@@ -603,9 +554,9 @@ def create_gradio_interface(config: Config) -> gr.Interface:
 
     with gr.Blocks(css=css, theme=gr.themes.Default()) as demo:
         gr.HTML("""<div class="header">
-            <h1>📚 AutoCitation</h1>
-            <p>Insert citations into your academic text</p>
-        </div>""")
+<h1>📚 AutoCitation</h1>
+<p>Insert citations into your academic text</p>
+</div>""")
 
         with gr.Group(elem_classes="input-group"):
             input_text = gr.Textbox(
@@ -675,11 +626,10 @@ def create_gradio_interface(config: Config) -> gr.Interface:
 
 if __name__ == "__main__":
     config = Config(
-        gemini_api_key=os.getenv("GEMINI_API_KEY"),
-        zhipu_api_key=os.getenv("ZHIPU_API_KEY")
+        gemini_api_key=os.getenv("GEMINI_API_KEY")
     )
-    if not config.gemini_api_key or not config.zhipu_api_key:
-        raise EnvironmentError("GEMINI_API_KEY or ZHIPU_API_KEY not set.")
+    if not config.gemini_api_key:
+        raise EnvironmentError("GEMINI_API_KEY not set.")
 
     demo = create_gradio_interface(config)
     try:
