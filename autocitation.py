@@ -8,6 +8,8 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+import sys
+from loguru import logger
 
 import aiohttp
 import gradio as gr
@@ -35,6 +37,7 @@ class Config:
     default_headers: dict = field(default_factory=lambda: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     })
+    log_level: str = 'DEBUG'  # Add log level configuration
 
 class ArxivXmlParser:
     NS = {
@@ -139,6 +142,8 @@ class CitationGenerator:
         )
         self.citation_chain = self._create_citation_chain()
         self.generate_queries_chain = self._create_generate_queries_chain()
+        logger.remove()
+        logger.add(sys.stderr, level=config.log_level)  # Configure logger
 
     def _create_citation_chain(self):
         citation_prompt = PromptTemplate.from_template(
@@ -206,7 +211,7 @@ class CitationGenerator:
             return ["deep learning neural networks"]
 
         except Exception as e:
-            print(f"Error generating queries: {e}")
+            logger.error(f"Error generating queries: {e}")  # Replace print with logger
             return ["deep learning neural networks"]
 
     async def search_arxiv(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
@@ -228,7 +233,7 @@ class CitationGenerator:
                 papers = self.xml_parser.parse_papers(text_data)
                 return papers
         except Exception as e:
-            print(f"Error searching ArXiv: {e}")
+            logger.error(f"Error searching ArXiv: {e}")  # Replace print with logger
             return []
 
     async def fix_author_name(self, author: str) -> str:
@@ -257,7 +262,7 @@ class CitationGenerator:
             return fixed_name if fixed_name else author
             
         except Exception as e:
-            print(f"Error fixing author name: {e}")
+            logger.error(f"Error fixing author name: {e}")  # Replace print with logger
             return author
 
     async def format_bibtex_author_names(self, text: str) -> str:
@@ -276,7 +281,7 @@ class CitationGenerator:
             writer.comma_first = False
             return writer.write(bib_database).strip()
         except Exception as e:
-            print(f"Error cleaning BibTeX special characters: {e}")
+            logger.error(f"Error cleaning BibTeX special characters: {e}")  # Replace print with logger
             return text
 
     async def search_crossref(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
@@ -368,7 +373,7 @@ class CitationGenerator:
                                         'bibtex_entry': formatted_bibtex
                                     })
                             except Exception as e:
-                                print(f"Error processing CrossRef item: {e}")
+                                logger.error(f"Error processing CrossRef item: {e}")  # Replace print with logger
                                 continue
 
                         return papers
@@ -378,11 +383,11 @@ class CitationGenerator:
                         print(f"Max retries reached for CrossRef search. Error: {e}")
                         raise
                     delay = self.config.base_delay * (2 ** attempt)
-                    print(f"Client error during CrossRef search: {e}. Retrying in {delay} seconds...")
+                    logger.warning(f"Client error during CrossRef search: {e}. Retrying in {delay} seconds...")
                     await asyncio.sleep(delay)
 
         except Exception as e:
-            print(f"Error searching CrossRef: {e}")
+            logger.error(f"Error searching CrossRef: {e}")  # Replace print with logger
             return []
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int,
@@ -439,7 +444,7 @@ class CitationGenerator:
 
             return cited_text, bibtex_entries
         except Exception as e:
-            print(f"Error inserting citations: {e}")
+            logger.error(f"Error inserting citations: {e}")  # Replace print with logger
             return text, ""
 
 def create_gradio_interface(config: Config) -> gr.Interface:
