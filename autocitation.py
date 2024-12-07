@@ -2,8 +2,6 @@ import asyncio
 import json
 import os
 import urllib.parse
-import unicodedata
-import html
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -31,7 +29,7 @@ class Config:
     max_retries: int = 3
     base_delay: int = 1
     max_queries: int = 5
-    max_citations_per_query: int = 5
+    max_citations_per_query: int = 10
     arxiv_base_url: str = 'http://export.arxiv.org/api/query?'
     crossref_base_url: str = 'https://api.crossref.org/works'
     default_headers: dict = field(default_factory=lambda: {
@@ -136,7 +134,7 @@ class CitationGenerator:
         self.async_context = AsyncContextManager()
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
-            temperature=0.1,
+            temperature=0.3,
             google_api_key=config.gemini_api_key,
             streaming=True
         )
@@ -313,7 +311,7 @@ class CitationGenerator:
                     ) as response:
                         if response.status == 429:
                             delay = self.config.base_delay * (2 ** attempt)
-                            print(f"Rate limited by CrossRef. Retrying in {delay} seconds...")
+                            logger.warning(f"Rate limited by CrossRef. Retrying in {delay} seconds...")
                             await asyncio.sleep(delay)
                             continue
 
@@ -360,6 +358,11 @@ class CitationGenerator:
                                     if 'author' not in entry:
                                         continue  # Skip entries without 'author'
 
+                                    # Extract necessary fields
+                                    title = entry.get('title', 'No Title').replace('{', '').replace('}', '')
+                                    authors = entry.get('author', 'Unknown').replace('\n', ' ').replace('\t', ' ').strip()
+                                    year = entry.get('year', 'Unknown')
+
                                     # Generate a unique BibTeX key
                                     key = self._generate_unique_bibtex_key(entry, existing_keys)
                                     entry['ID'] = key
@@ -372,6 +375,9 @@ class CitationGenerator:
                                     formatted_bibtex = writer.write(bib_database).strip()
 
                                     papers.append({
+                                        'title': title,
+                                        'authors': authors,
+                                        'year': year,
                                         'bibtex_key': key,
                                         'bibtex_entry': formatted_bibtex
                                     })
@@ -383,7 +389,7 @@ class CitationGenerator:
 
                 except aiohttp.ClientError as e:
                     if attempt == self.config.max_retries - 1:
-                        print(f"Max retries reached for CrossRef search. Error: {e}")
+                        logger.error(f"Max retries reached for CrossRef search. Error: {e}")
                         raise
                     delay = self.config.base_delay * (2 ** attempt)
                     logger.warning(f"Client error during CrossRef search: {e}. Retrying in {delay} seconds...")
@@ -419,7 +425,7 @@ class CitationGenerator:
         return key
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int,
-                          use_arxiv: bool = True, use_crossref: bool = True) -> tuple[str, str]:
+                        use_arxiv: bool = True, use_crossref: bool = True) -> tuple[str, str]:
         if not (use_arxiv or use_crossref):
             return "Please select at least one source (ArXiv or CrossRef)", ""
 
@@ -464,7 +470,13 @@ class CitationGenerator:
 
             # Use bibtexparser to aggregate BibTeX entries
             bib_database = BibDatabase()
-            bib_database.entries = [bibtexparser.loads(p['bibtex_entry']).entries[0] for p in papers if 'bibtex_entry' in p]
+            for p in papers:
+                if 'bibtex_entry' in p:
+                    bib_db = bibtexparser.loads(p['bibtex_entry'])
+                    if bib_db.entries:
+                        bib_database.entries.append(bib_db.entries[0])
+                    else:
+                        logger.warning(f"Empty BibTeX entry for key: {p['bibtex_key']}")
             writer = BibTexWriter()
             writer.indent = '    '
             writer.comma_first = False
