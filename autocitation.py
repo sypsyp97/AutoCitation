@@ -2,18 +2,20 @@ import asyncio
 import json
 import os
 import urllib.parse
+import unicodedata
+import html
+import re
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 import aiohttp
 import gradio as gr
-from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
-from loguru import logger
-from typing import Dict, List, Optional
 from zhipuai import ZhipuAI
 
 load_dotenv()
@@ -22,13 +24,15 @@ load_dotenv()
 class Config:
     gemini_api_key: str
     zhipu_api_key: str
+    max_retries: int = 3
+    base_delay: int = 1
     max_queries: int = 20
     max_citations_per_query: int = 10
     arxiv_base_url: str = 'http://export.arxiv.org/api/query?'
+    crossref_base_url: str = 'https://api.crossref.org/works'
     default_headers: dict = field(default_factory=lambda: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     })
-
 
 class ArxivXmlParser:
     NS = {
@@ -45,8 +49,7 @@ class ArxivXmlParser:
                 if paper:
                     papers.append(paper)
             return papers
-        except Exception as e:
-            logger.error(f"Error parsing ArXiv response: {str(e)}")
+        except Exception:
             return []
 
     def parse_entry(self, entry) -> Optional[dict]:
@@ -85,8 +88,7 @@ class ArxivXmlParser:
                 'bibtex_key': bibtex_key,
                 'bibtex_entry': bibtex_entry
             }
-        except Exception as e:
-            logger.warning(f"Error processing paper entry: {str(e)}")
+        except Exception:
             return None
 
     @staticmethod
@@ -105,7 +107,6 @@ class ArxivXmlParser:
             year={{{year}}}
         }}"""
 
-
 class AsyncContextManager:
     async def __aenter__(self):
         self._session = aiohttp.ClientSession()
@@ -115,7 +116,6 @@ class AsyncContextManager:
         if self._session:
             await self._session.close()
 
-
 class CitationGenerator:
     def __init__(self, config: Config):
         self.config = config
@@ -124,7 +124,7 @@ class CitationGenerator:
         self.zhipu_client = ZhipuAI(api_key=config.zhipu_api_key)
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
-            temperature=0.5,
+            temperature=0.1,
             google_api_key=config.gemini_api_key,
             streaming=True
         )
@@ -169,7 +169,8 @@ class CitationGenerator:
                     Text: {text}
                     """}
                 ],
-                temperature=0.0
+                temperature=0.0,
+                max_tokens=1024
             )
 
             task_id = response.id
@@ -194,23 +195,14 @@ class CitationGenerator:
                         queries = json.loads(content)
                         if isinstance(queries, list):
                             return [q.strip() for q in queries if isinstance(q, str)][:num_queries]
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON parsing error: {str(e)}, raw content: {content}")
+                    except json.JSONDecodeError:
                         lines = [line.strip() for line in content.split('\n')
-                                 if line.strip() and not line.strip().startswith(('[', ']'))]
+                                if line.strip() and not line.strip().startswith(('[', ']'))]
                         return lines[:num_queries]
-
-                elif task_status == 'FAIL':
-                    logger.error("Async query generation failed.")
-                    break
-
-            if task_status == 'PROCESSING':
-                logger.error("Async query generation timed out.")
 
             return ["deep learning neural networks"]
 
-        except Exception as e:
-            logger.error(f"Error generating queries: {str(e)}")
+        except Exception:
             return ["deep learning neural networks"]
 
     async def search_arxiv(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
@@ -230,11 +222,233 @@ class CitationGenerator:
             ) as response:
                 text_data = await response.text()
                 return self.xml_parser.parse_papers(text_data)
-        except Exception as e:
-            logger.error(f"ArXiv search error for query '{query}': {str(e)}")
+        except Exception:
             return []
 
-    async def process_text(self, text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
+    async def fix_corrupted_chars(self, match, context_text: str) -> str:
+        char = match.group(0)
+        if char != '�':
+            return char
+            
+        # Extract context window around corrupted character
+        start = max(0, match.start() - 50)
+        end = min(len(context_text), match.end() + 50)
+        context = context[start:end]
+        
+        try:
+            prompt = f"""Analyze this text with a corrupted character (�) and determine the most likely correct character:
+            
+            Text: {context}
+            
+            Requirements:
+            1. Return ONLY the single replacement character
+            2. Focus on names and common character patterns
+            3. Consider language context (Spanish, etc.)
+            4. If uncertain, default to 'a'
+            """
+            
+            response = await self.llm.ainvoke([{
+                "role": "user",
+                "content": prompt
+            }])
+            
+            suggested_char = response.content.strip()
+            if len(suggested_char) == 1:
+                return suggested_char
+                
+        except Exception as e:
+            print(f"Error using LLM for character fix: {str(e)}")
+        
+        # Fallback to basic rules if LLM fails
+        if 'González' in context_text:
+            return 'á'
+        elif 'Cristián' in context_text:
+            return 'á'
+        else:
+            return 'a'
+
+    async def fix_all_corrupted_chars(self, text: str) -> str:
+        """
+        Process all corrupted characters in a text string asynchronously.
+        """
+        matches = list(re.finditer(r'�', text))
+        if not matches:
+            return text
+            
+        # Store the original string and keep track of offset changes
+        result = text
+        offset = 0
+        
+        # Process each match one by one
+        for match in matches:
+            # Adjust match position for previous replacements
+            pos = match.start() + offset
+            fixed_char = await self.fix_corrupted_chars(match, text)
+            
+            # Replace the character and update the offset
+            result = result[:pos] + fixed_char + result[pos + 1:]
+            offset += len(fixed_char) - 1  # -1 because we're replacing one character
+            
+        return result
+
+    async def clean_bibtex_special_chars(self, text: str) -> str:
+        def process_bibtex_entry(entry):
+            if 'author = {' in entry:
+                author_start = entry.find('author = {') + len('author = {')
+                author_end = entry.find('}', author_start)
+                if author_start > -1 and author_end > -1:
+                    authors = entry[author_start:author_end]
+                    author_list = authors.split(' and ')
+                    processed_authors = []
+                    for author in author_list:
+                        processed_author = author
+                        for char, latex_cmd in latex_chars.items():
+                            processed_author = processed_author.replace(char, latex_cmd)
+                        processed_authors.append(processed_author)
+                    
+                    new_authors = ' and '.join(processed_authors)
+                    entry = entry[:author_start] + new_authors + entry[author_end:]
+            return entry
+
+        latex_chars = {
+            'á': '{\\\'a}', 'é': '{\\\'e}', 'í': '{\\\'i}', 'ó': '{\\\'o}', 'ú': '{\\\'u}',
+            'Á': '{\\\'A}', 'É': '{\\\'E}', 'Í': '{\\\'I}', 'Ó': '{\\\'O}', 'Ú': '{\\\'U}',
+            'ñ': '{\\~n}', 'Ñ': '{\\~N}',
+            'ü': '{\\"u}', 'Ü': '{\\"U}',
+            'ï': '{\\"i}', 'Ï': '{\\"I}'
+        }
+        
+        entries = text.split('@')[1:]
+        processed_entries = []
+        for entry in entries:
+            if entry.strip():
+                processed_entry = process_bibtex_entry('@' + entry)
+                processed_entries.append(processed_entry)
+        
+        result = ''.join(processed_entries)
+        
+        # Handle corrupted characters using LLM
+        result = await self.fix_all_corrupted_chars(result)
+        
+        # Convert remaining special characters
+        result = ''.join(c if c.isascii() or c.isspace() or c == '-' else 
+                      latex_chars.get(c, c) if c in latex_chars else 
+                      c if c.isspace() else c 
+                      for c in result)
+        
+        return result.strip()
+
+    async def search_crossref(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
+        try:
+            cleaned_query = query.replace("'", "").replace('"', "")
+            if ' ' in cleaned_query:
+                cleaned_query = f'"{cleaned_query}"'
+            encoded_query = urllib.parse.quote(cleaned_query)
+            
+            params = {
+                'query.bibliographic': encoded_query,
+                'rows': max_results,
+                'select': 'DOI,title,author,published-print,container-title',
+                'sort': 'relevance',
+                'order': 'desc'
+            }
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (compatible; CitationBot/1.0; mailto:example@domain.com)',
+                'Accept': 'application/json'
+            }
+            
+            for attempt in range(self.config.max_retries):
+                try:
+                    async with session.get(
+                        self.config.crossref_base_url,
+                        params=params,
+                        headers=headers,
+                        timeout=30
+                    ) as response:
+                        if response.status == 429:
+                            delay = self.config.base_delay * (2 ** attempt)
+                            await asyncio.sleep(delay)
+                            continue
+                        
+                        response.raise_for_status()
+                        search_data = await response.json()
+                        items = search_data.get('message', {}).get('items', [])
+                        
+                        if not items:
+                            return []
+                        
+                        papers = []
+                        for item in items:
+                            doi = item.get('DOI')
+                            if not doi:
+                                continue
+                            
+                            try:
+                                bibtex_url = f"https://doi.org/{doi}"
+                                async with session.get(
+                                    bibtex_url,
+                                    headers={
+                                        'Accept': 'text/bibliography; style=bibtex',
+                                        'User-Agent': 'Mozilla/5.0 (compatible; CitationBot/1.0; mailto:example@domain.com)'
+                                    },
+                                    timeout=30
+                                ) as bibtex_response:
+                                    if bibtex_response.status != 200:
+                                        continue
+
+                                    bibtex_bytes = await bibtex_response.read()
+                                    try:
+                                        bibtex_text = bibtex_bytes.decode('utf-8')
+                                    except UnicodeDecodeError:
+                                        try:
+                                            bibtex_text = bibtex_bytes.decode('latin1')
+                                        except UnicodeDecodeError:
+                                            bibtex_text = bibtex_bytes.decode('utf-8', errors='replace')
+
+                                    if not bibtex_text.strip():
+                                        continue
+
+                                    bibtex_text = urllib.parse.unquote(bibtex_text)
+                                    bibtex_text = html.unescape(bibtex_text)
+                                    bibtex_text = unicodedata.normalize('NFKC', bibtex_text)
+                                    bibtex_text = await self.clean_bibtex_special_chars(bibtex_text)
+                                    bibtex_text = bibtex_text.strip()
+                                    bibtex_text = re.sub(r'\s+', ' ', bibtex_text)
+                                    bibtex_text = bibtex_text.replace(' @', '@')
+                                    
+                                    match = re.match(r'@(\w+)\s*{\s*([^,\s]+)\s*,', bibtex_text)
+                                    if match:
+                                        entry_type, key = match.groups()
+                                        key = re.sub(r'[^\w-]', '', key)
+                                        
+                                        bibtex_text = re.sub(r'@(\w+)\s*{\s*([^,]+),', f'@{entry_type}{{{key},', bibtex_text)
+                                        bibtex_text = re.sub(r',\s+([a-zA-Z]+)\s*=', r',\n    \1 = ', bibtex_text)
+                                        bibtex_text = re.sub(r'}\s*$', '\n}', bibtex_text)
+                                        
+                                        papers.append({
+                                            'bibtex_key': key,
+                                            'bibtex_entry': bibtex_text
+                                        })
+                            except Exception:
+                                continue
+                        
+                        return papers
+                        
+                except aiohttp.ClientError as e:
+                    if attempt == self.config.max_retries - 1:
+                        raise
+                    delay = self.config.base_delay * (2 ** attempt)
+                    await asyncio.sleep(delay)
+                    
+        except Exception:
+            return []
+
+    async def process_text(self, text: str, num_queries: int, citations_per_query: int,
+                          use_arxiv: bool = True, use_crossref: bool = True) -> tuple[str, str]:
+        if not (use_arxiv or use_crossref):
+            return "Please select at least one source (ArXiv or CrossRef)", ""
+
         num_queries = min(max(1, num_queries), self.config.max_queries)
         citations_per_query = min(max(1, citations_per_query), self.config.max_citations_per_query)
 
@@ -243,7 +457,13 @@ class CitationGenerator:
             return text, ""
 
         async with self.async_context as session:
-            search_tasks = [self.search_arxiv(session, q, citations_per_query) for q in queries]
+            search_tasks = []
+            for query in queries:
+                if use_arxiv:
+                    search_tasks.append(self.search_arxiv(session, query, citations_per_query))
+                if use_crossref:
+                    search_tasks.append(self.search_crossref(session, query, citations_per_query))
+            
             results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
         papers = []
@@ -251,7 +471,6 @@ class CitationGenerator:
             if not isinstance(r, Exception):
                 papers.extend(r)
 
-        # Deduplicate papers by their bibtex_key
         unique_papers = []
         seen_keys = set()
         for p in papers:
@@ -270,23 +489,24 @@ class CitationGenerator:
             })
             bibtex_entries = "\n\n".join(p['bibtex_entry'] for p in papers if 'bibtex_entry' in p)
             return cited_text, bibtex_entries
-        except Exception as e:
-            logger.error(f"Citation generation error: {str(e)}")
+        except Exception:
             return text, ""
-
 
 def create_gradio_interface(config: Config) -> gr.Interface:
     citation_gen = CitationGenerator(config)
 
-    async def process(text: str, num_queries: int, citations_per_query: int) -> tuple[str, str]:
+    async def process(text: str, num_queries: int, citations_per_query: int,
+                     use_arxiv: bool, use_crossref: bool) -> tuple[str, str]:
         if not text.strip():
             return "Please enter text to process", ""
         try:
-            return await citation_gen.process_text(text, num_queries, citations_per_query)
+            return await citation_gen.process_text(
+                text, num_queries, citations_per_query,
+                use_arxiv=use_arxiv, use_crossref=use_crossref
+            )
         except ValueError as e:
             return f"Input validation error: {str(e)}", ""
         except Exception as e:
-            logger.error(f"Processing error: {str(e)}")
             return f"Error: {str(e)}", ""
 
     css = """
@@ -337,6 +557,18 @@ def create_gradio_interface(config: Config) -> gr.Interface:
             display: flex !important;
             gap: 0.75rem;
             margin-top: 0.5rem;
+        }
+
+        .source-controls {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 0.5rem;
+        }
+        
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
 
         input[type="number"], textarea {
@@ -398,6 +630,20 @@ def create_gradio_interface(config: Config) -> gr.Interface:
                         maximum=config.max_citations_per_query,
                         step=1
                     )
+            
+            with gr.Row(elem_classes="source-controls"):
+                with gr.Column(scale=1):
+                    use_arxiv = gr.Checkbox(
+                        label="Search ArXiv",
+                        value=True,
+                        elem_classes="checkbox-group"
+                    )
+                with gr.Column(scale=1):
+                    use_crossref = gr.Checkbox(
+                        label="Search CrossRef (Experimental)",
+                        value=True,
+                        elem_classes="checkbox-group"
+                    )
                 with gr.Column(scale=2):
                     process_btn = gr.Button(
                         "Generate",
@@ -421,12 +667,11 @@ def create_gradio_interface(config: Config) -> gr.Interface:
 
         process_btn.click(
             fn=process,
-            inputs=[input_text, num_queries, citations_per_query],
+            inputs=[input_text, num_queries, citations_per_query, use_arxiv, use_crossref],
             outputs=[cited_text, bibtex]
         )
 
     return demo
-
 
 if __name__ == "__main__":
     config = Config(
