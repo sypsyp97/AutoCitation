@@ -9,7 +9,7 @@ AutoCitation automatically analyzes your text content and generates relevant aca
 
 ## 🎉 Demo
 
-![AutoCitation Demo](example.gif)
+![AutoCitation Demo](example.png)
 
 ## 🚀 Getting Started
 
