@@ -284,10 +284,9 @@ class CitationGenerator:
             cleaned_query = query.replace("'", "").replace('"', "")
             if ' ' in cleaned_query:
                 cleaned_query = f'"{cleaned_query}"'
-            encoded_query = urllib.parse.quote(cleaned_query)
-
+            # Removed manual encoding of the query
             params = {
-                'query.bibliographic': encoded_query,
+                'query.bibliographic': cleaned_query,
                 'rows': max_results,
                 'select': 'DOI,title,author,published-print,container-title',
                 'sort': 'relevance',
