@@ -233,7 +233,7 @@ class CitationGenerator:
                 papers = self.xml_parser.parse_papers(text_data)
                 return papers
         except Exception as e:
-            logger.error(f"Error searching ArXiv: {e}")  # Replace print with logger
+            logger.error(f"Error searching ArXiv: {e}")
             return []
 
     async def fix_author_name(self, author: str) -> str:
@@ -262,7 +262,7 @@ class CitationGenerator:
             return fixed_name if fixed_name else author
             
         except Exception as e:
-            logger.error(f"Error fixing author name: {e}")  # Replace print with logger
+            logger.error(f"Error fixing author name: {e}")
             return author
 
     async def format_bibtex_author_names(self, text: str) -> str:
@@ -281,7 +281,7 @@ class CitationGenerator:
             writer.comma_first = False
             return writer.write(bib_database).strip()
         except Exception as e:
-            logger.error(f"Error cleaning BibTeX special characters: {e}")  # Replace print with logger
+            logger.error(f"Error cleaning BibTeX special characters: {e}") 
             return text
 
     async def search_crossref(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
@@ -289,7 +289,7 @@ class CitationGenerator:
             cleaned_query = query.replace("'", "").replace('"', "")
             if ' ' in cleaned_query:
                 cleaned_query = f'"{cleaned_query}"'
-            # Removed manual encoding of the query
+
             params = {
                 'query.bibliographic': cleaned_query,
                 'rows': max_results,
@@ -325,6 +325,7 @@ class CitationGenerator:
                             return []
 
                         papers = []
+                        existing_keys = set()
                         for item in items:
                             doi = item.get('DOI')
                             if not doi:
@@ -344,13 +345,6 @@ class CitationGenerator:
                                         continue
 
                                     bibtex_text = await bibtex_response.text()
-                                    bibtex_text = urllib.parse.unquote(bibtex_text)
-                                    bibtex_text = html.unescape(bibtex_text)
-                                    bibtex_text = unicodedata.normalize('NFKC', bibtex_text)
-                                    bibtex_text = await self.format_bibtex_author_names(bibtex_text)
-                                    bibtex_text = bibtex_text.strip()
-                                    bibtex_text = re.sub(r'\s+', ' ', bibtex_text)
-                                    bibtex_text = bibtex_text.replace(' @', '@')
 
                                     # Parse the BibTeX entry
                                     bib_database = bibtexparser.loads(bibtex_text)
@@ -358,9 +352,18 @@ class CitationGenerator:
                                         continue
                                     entry = bib_database.entries[0]
 
-                                    # Clean the BibTeX key
-                                    key = re.sub(r'[^\w-]', '', entry.get('ID', 'unknown'))
+                                    # Check if 'title' or 'booktitle' is present
+                                    if 'title' not in entry and 'booktitle' not in entry:
+                                        continue  # Skip entries without 'title' or 'booktitle'
+                                    
+                                    # Check if 'author' is present
+                                    if 'author' not in entry:
+                                        continue  # Skip entries without 'author'
+
+                                    # Generate a unique BibTeX key
+                                    key = self._generate_unique_bibtex_key(entry, existing_keys)
                                     entry['ID'] = key
+                                    existing_keys.add(key)
 
                                     # Use BibTexWriter to format the entry
                                     writer = BibTexWriter()
@@ -389,6 +392,31 @@ class CitationGenerator:
         except Exception as e:
             logger.error(f"Error searching CrossRef: {e}")  # Replace print with logger
             return []
+
+    def _generate_unique_bibtex_key(self, entry: Dict, existing_keys: set) -> str:
+        entry_type = entry.get('ENTRYTYPE', '').lower()
+        author_field = entry.get('author', '')
+        year = entry.get('year', '')
+        authors = [a.strip() for a in author_field.split(' and ')]
+        first_author_last_name = authors[0].split(',')[0] if authors else 'unknown'
+        
+        if entry_type == 'inbook':
+            # Use 'booktitle' for 'inbook' entries
+            booktitle = entry.get('booktitle', '')
+            title_word = re.sub(r'\W+', '', booktitle.split()[0]) if booktitle else 'untitled'
+        else:
+            # Use regular 'title' for other entries
+            title = entry.get('title', '')
+            title_word = re.sub(r'\W+', '', title.split()[0]) if title else 'untitled'
+        
+        base_key = f"{first_author_last_name}{year}{title_word}"
+        # Ensure the key is unique
+        key = base_key
+        index = 1
+        while key in existing_keys:
+            key = f"{base_key}{index}"
+            index += 1
+        return key
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int,
                           use_arxiv: bool = True, use_crossref: bool = True) -> tuple[str, str]:
