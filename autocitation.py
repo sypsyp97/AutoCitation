@@ -172,8 +172,8 @@ class CitationGenerator:
         }
         try:
             prompt = self.generate_queries_prompt.format(**input_map)
-            response = await self.llm.apredict(prompt)
-            content = response.strip()
+            response = await self.llm.ainvoke(prompt)
+            content = response.content.strip()
             if not content.startswith('['):
                 start = content.find('[')
                 end = content.rfind(']') + 1
@@ -230,8 +230,8 @@ class CitationGenerator:
                     4. If unsure, use the most likely letter
                     5. Maintain the format: "Lastname, Firstname"
                     """
-            response = await self.llm.apredict(prompt)
-            fixed_name = response.strip()
+            response = await self.llm.ainvoke(prompt)
+            fixed_name = response.content.strip()
             return fixed_name if fixed_name else author
         except Exception as e:
             logger.error(f"Error fixing author name: {e}")
@@ -428,10 +428,10 @@ class CitationGenerator:
                     "papers": json.dumps(input_data["papers"], indent=2)
                 }
                 prompt = self.citation_prompt.format(**citation_input)
-                response = await self.llm.apredict(prompt)
-                cited_text = response.strip()
+                response = await self.llm.ainvoke(prompt)
+                cited_text = response.content.strip()
 
-                # Aggregate BibTeX entries
+                # Aggregate BibTeX entries  
                 bib_database = BibDatabase()
                 for p in input_data["papers"]:
                     if 'bibtex_entry' in p:
@@ -482,9 +482,7 @@ def create_gradio_interface() -> gr.Interface:
         if not text.strip():
             return "Please enter text to process", ""
         try:
-            config = Config(
-                gemini_api_key=api_key
-            )
+            config = Config(gemini_api_key=api_key)
             citation_gen = CitationGenerator(config)
             return await citation_gen.process_text(
                 text, num_queries, citations_per_query,
@@ -497,165 +495,188 @@ def create_gradio_interface() -> gr.Interface:
 
     css = """
         :root {
-            --primary: #6A7E76;
-            --primary-hover: #566961;
-            --bg: #FFFFFF;
-            --text: #454442;
-            --border: #B4B0AC;
-            --control-bg: #F5F3F0;
+            /* Modern, sophisticated color palette */
+            --primary-bg: #F8F9FA;
+            --secondary-bg: #FFFFFF;
+            --accent-1: #4A90E2;    /* Refined blue */
+            --accent-2: #50C878;    /* Emerald green */
+            --accent-3: #F5B041;    /* Warm orange */
+            --text-primary: #2C3E50; /* Deep blue-gray */
+            --text-secondary: #566573; /* Medium gray */
+            --border: #E5E7E9;
+            --shadow: rgba(0, 0, 0, 0.1);
         }
 
-        .container, .header, .input-group, .controls-row {
-            padding: 0.75rem;
-        }
-
-        .container {
-            max-width: 100%;
-            background: var(--bg);
+        body {
+            background-color: var(--primary-bg);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
         }
 
         .header {
             text-align: center;
-            margin-bottom: 1rem;
-            background: var(--bg);
-            border-bottom: 1px solid var(--border);
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+            background-color: var(--secondary-bg);
+            box-shadow: 0 2px 4px var(--shadow);
+            border-bottom: none;
         }
 
         .header h1 {
-            font-size: 1.5rem;
-            color: var(--primary);
-            font-weight: 500;
-            margin-bottom: 0.25rem;
-        }
-
-        .header p, label span {
-            font-size: 0.9rem;
-            color: var(--text);
-        }
-
-        .input-group {
-            border-radius: 4px;
-            border: 1px solid var(--border);
+            font-size: 2.25rem;
+            color: var(--accent-1);
             margin-bottom: 0.75rem;
+            font-weight: 600;
         }
 
-        .controls-row {
-            display: flex !important;
-            gap: 0.75rem;
-            margin-top: 0.5rem;
+        .header p {
+            font-size: 1.1rem;
+            color: var(--text-secondary);
         }
 
-        .source-controls {
-            display: flex;
-            gap: 0.75rem;
-            margin-top: 0.5rem;
-        }
-        
-        .checkbox-group {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        input[type="number"], textarea {
+        .input-group, .controls-row, .source-controls, .output-group {
+            padding: 1rem;
+            margin-bottom: 1.5rem;
             border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 0.5rem;
-            background: var(--control-bg);
-            color: var(--text);
-            font-size: 0.95rem;
+            border-radius: 12px;
+            background-color: var(--secondary-bg);
+            box-shadow: 0 1px 3px var(--shadow);
+        }
+
+        .input-group label, .controls-row label, .source-controls label {
+            color: var(--text-primary);
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+            display: block;
+        }
+
+        input[type="number"], textarea, .gradio-input, .gradio-output {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.75rem;
+            background-color: var(--primary-bg);
+            color: var(--text-primary);
+            font-size: 1rem;
+            width: 100%;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+
+        input[type="number"]:focus, textarea:focus {
+            border-color: var(--accent-1);
+            box-shadow: 0 0 0 2px rgba(74, 144, 226, 0.1);
+            outline: none;
         }
 
         .generate-btn {
-            background: var(--primary);
+            background-color: var(--accent-1);
             color: white;
-            padding: 0.5rem 1.5rem;
-            border-radius: 4px;
+            padding: 1rem 2rem;
             border: none;
-            font-size: 0.9rem;
-            transition: background 0.2s;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
             width: 100%;
         }
 
         .generate-btn:hover {
-            background: var(--primary-hover);
+            background-color: #357ABD;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px var(--shadow);
         }
 
-        .output-container {
-            display: flex;
-            gap: 0.75rem;
+        .gradio-button {
+            background-color: var(--accent-2) !important;
+            border-radius: 8px !important;
+            transition: all 0.3s ease !important;
+        }
+
+        .gradio-button:hover {
+            background-color: #45B76C !important;
+            transform: translateY(-1px);
+        }
+
+        .gradio-copy-button {
+            background-color: var(--accent-3) !important;
+            color: var(--text-primary) !important;
+            border: none !important;
+            border-radius: 6px !important;
+            padding: 0.4rem 0.8rem !important;
+            cursor: pointer !important;
+            font-size: 0.9rem !important;
+            font-weight: 500 !important;
+            transition: all 0.3s ease !important;
+        }
+
+        .gradio-copy-button:hover {
+            background-color: #F39C12 !important;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px var(--shadow);
         }
     """
 
     with gr.Blocks(css=css, theme=gr.themes.Default()) as demo:
-        gr.HTML("""<div class="header">
+
+        gr.HTML("""
+            <div class="header">
                 <h1>📚 AutoCitation</h1>
-                <p>Insert citations into your academic text</p>
-                </div>""")
+                <p>An AI agent that automatically adds citations into your academic text</p>
+            </div>
+        """)
 
-        with gr.Group(elem_classes="input-group"):
-            api_key = gr.Textbox(
-                label="Gemini API Key",
-                placeholder="Enter your Gemini API key...",
-                type="password",
-                interactive=True
-            )
-            input_text = gr.Textbox(
-                label="Input Text",
-                placeholder="Paste or type your text here...",
-                lines=8
-            )
-            with gr.Row(elem_classes="controls-row"):
-                with gr.Column(scale=1):
-                    num_queries = gr.Number(
-                        label="Search Queries",
-                        value=3,
-                        minimum=1,
-                        maximum=Config.max_queries,
-                        step=1
-                    )
-                with gr.Column(scale=1):
-                    citations_per_query = gr.Number(
-                        label="Citations per Query",
-                        value=1,
-                        minimum=1,
-                        maximum=Config.max_citations_per_query,
-                        step=1
-                    )
-            
-            with gr.Row(elem_classes="source-controls"):
-                with gr.Column(scale=1):
-                    use_arxiv = gr.Checkbox(
-                        label="Search ArXiv",
-                        value=True,
-                        elem_classes="checkbox-group"
-                    )
-                with gr.Column(scale=1):
-                    use_crossref = gr.Checkbox(
-                        label="Search CrossRef (Experimental)",
-                        value=True,
-                        elem_classes="checkbox-group"
-                    )
-                with gr.Column(scale=2):
-                    process_btn = gr.Button(
-                        "Generate",
-                        elem_classes="generate-btn"
-                    )
+        api_key = gr.Textbox(
+            label="Gemini API Key",
+            placeholder="Enter your Gemini API key...",
+            type="password"
+        )
 
-        with gr.Group(elem_classes="output-group"):
-            with gr.Row():
-                with gr.Column(scale=1):
-                    cited_text = gr.Textbox(
-                        label="Generated Text",
-                        lines=10,
-                        show_copy_button=True
-                    )
-                with gr.Column(scale=1):
-                    bibtex = gr.Textbox(
-                        label="BibTeX References",
-                        lines=10,
-                        show_copy_button=True
-                    )
+        input_text = gr.Textbox(
+            label="Input Text",
+            placeholder="Paste or type your text here...",
+            lines=8
+        )
+
+        with gr.Row():
+            num_queries = gr.Number(
+                label="Search Queries",
+                value=3,
+                minimum=1,
+                maximum=Config.max_queries,
+                step=1
+            )
+            citations_per_query = gr.Number(
+                label="Citations per Query",
+                value=1,
+                minimum=1,
+                maximum=Config.max_citations_per_query,
+                step=1
+            )
+
+        with gr.Row():
+            use_arxiv = gr.Checkbox(
+                label="Search arXiv",
+                value=True
+            )
+            use_crossref = gr.Checkbox(
+                label="Search Crossref",
+                value=True
+            )
+
+        process_btn = gr.Button("Generate", elem_classes="generate-btn")
+
+        with gr.Row():
+            cited_text = gr.Textbox(
+                label="Generated Text",
+                lines=10,
+                show_copy_button=True
+            )
+            bibtex = gr.Textbox(
+                label="BibTeX References",
+                lines=10,
+                show_copy_button=True
+            )
 
         process_btn.click(
             fn=process,
