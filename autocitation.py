@@ -11,9 +11,9 @@ from loguru import logger
 
 import aiohttp
 import gradio as gr
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+
+from langchain.prompts import PromptTemplate
+
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 import bibtexparser
@@ -32,7 +32,7 @@ class Config:
     default_headers: dict = field(default_factory=lambda: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     })
-    log_level: str = 'DEBUG'  # Add log level configuration
+    log_level: str = 'DEBUG'
 
 class ArxivXmlParser:
     NS = {
@@ -111,8 +111,8 @@ class ArxivXmlParser:
             'year': year
         }]
         writer = BibTexWriter()
-        writer.indent = '    '  # Indentation for entries
-        writer.comma_first = False  # Place the comma at the end of lines
+        writer.indent = '    '
+        writer.comma_first = False
         return writer.write(db).strip()
 
 class AsyncContextManager:
@@ -135,13 +135,7 @@ class CitationGenerator:
             google_api_key=config.gemini_api_key,
             streaming=True
         )
-        self.citation_chain = self._create_citation_chain()
-        self.generate_queries_chain = self._create_generate_queries_chain()
-        logger.remove()
-        logger.add(sys.stderr, level=config.log_level)  # Configure logger
-
-    def _create_citation_chain(self):
-        citation_prompt = PromptTemplate.from_template(
+        self.citation_prompt = PromptTemplate.from_template(
             """Insert citations into the provided text using LaTeX \\cite{{key}} commands.
             
             You must not alter the original wording or structure of the text beyond adding citations.
@@ -154,15 +148,8 @@ class CitationGenerator:
             {papers}
             """
         )
-        return (
-            {"text": RunnablePassthrough(), "papers": RunnablePassthrough()}
-            | citation_prompt
-            | self.llm
-            | StrOutputParser()
-        )
-    
-    def _create_generate_queries_chain(self):
-        generate_queries_prompt = PromptTemplate.from_template(
+
+        self.generate_queries_prompt = PromptTemplate.from_template(
             """Generate {num_queries} diverse academic search queries based on the given text.
             The queries should be concise and relevant.
 
@@ -174,20 +161,18 @@ class CitationGenerator:
             Text: {text}
             """
         )
-        return (
-            {"text": RunnablePassthrough(), "num_queries": RunnablePassthrough()}
-            | generate_queries_prompt
-            | self.llm
-            | StrOutputParser()
-        )
+
+        logger.remove()
+        logger.add(sys.stderr, level=config.log_level)
 
     async def generate_queries(self, text: str, num_queries: int) -> List[str]:
+        input_map = {
+            "text": text,
+            "num_queries": num_queries
+        }
         try:
-            response = await self.generate_queries_chain.ainvoke({
-                "text": text,
-                "num_queries": num_queries
-            })
-            
+            prompt = self.generate_queries_prompt.format(**input_map)
+            response = await self.llm.apredict(prompt)
             content = response.strip()
             if not content.startswith('['):
                 start = content.find('[')
@@ -206,7 +191,7 @@ class CitationGenerator:
             return ["deep learning neural networks"]
 
         except Exception as e:
-            logger.error(f"Error generating queries: {e}")  # Replace print with logger
+            logger.error(f"Error generating queries: {e}")
             return ["deep learning neural networks"]
 
     async def search_arxiv(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
@@ -218,7 +203,6 @@ class CitationGenerator:
                 'sortBy': 'relevance',
                 'sortOrder': 'descending'
             }
-
             async with session.get(
                 self.config.arxiv_base_url + urllib.parse.urlencode(params),
                 headers=self.config.default_headers,
@@ -234,7 +218,6 @@ class CitationGenerator:
     async def fix_author_name(self, author: str) -> str:
         if not re.search(r'[�]', author):
             return author
-            
         try:
             prompt = f"""Fix this author name that contains corrupted characters (�):
 
@@ -244,18 +227,12 @@ class CitationGenerator:
                     1. Return ONLY the fixed author name
                     2. Use proper diacritical marks for names
                     3. Consider common name patterns and languages
-                    4. If unsure about a character, use the most likely letter
+                    4. If unsure, use the most likely letter
                     5. Maintain the format: "Lastname, Firstname"
-
-                    Example fixes:
-                    - "Gonz�lez" -> "González"
-                    - "Cristi�n" -> "Cristián"
                     """
-            
-            response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
-            fixed_name = response.content.strip()
+            response = await self.llm.apredict(prompt)
+            fixed_name = response.strip()
             return fixed_name if fixed_name else author
-            
         except Exception as e:
             logger.error(f"Error fixing author name: {e}")
             return author
@@ -276,7 +253,7 @@ class CitationGenerator:
             writer.comma_first = False
             return writer.write(bib_database).strip()
         except Exception as e:
-            logger.error(f"Error cleaning BibTeX special characters: {e}") 
+            logger.error(f"Error cleaning BibTeX special characters: {e}")
             return text
 
     async def search_crossref(self, session: aiohttp.ClientSession, query: str, max_results: int) -> List[Dict]:
@@ -341,31 +318,24 @@ class CitationGenerator:
 
                                     bibtex_text = await bibtex_response.text()
 
-                                    # Parse the BibTeX entry
                                     bib_database = bibtexparser.loads(bibtex_text)
                                     if not bib_database.entries:
                                         continue
                                     entry = bib_database.entries[0]
 
-                                    # Check if 'title' or 'booktitle' is present
                                     if 'title' not in entry and 'booktitle' not in entry:
-                                        continue  # Skip entries without 'title' or 'booktitle'
-                                    
-                                    # Check if 'author' is present
+                                        continue
                                     if 'author' not in entry:
-                                        continue  # Skip entries without 'author'
+                                        continue
 
-                                    # Extract necessary fields
                                     title = entry.get('title', 'No Title').replace('{', '').replace('}', '')
                                     authors = entry.get('author', 'Unknown').replace('\n', ' ').replace('\t', ' ').strip()
                                     year = entry.get('year', 'Unknown')
 
-                                    # Generate a unique BibTeX key
                                     key = self._generate_unique_bibtex_key(entry, existing_keys)
                                     entry['ID'] = key
                                     existing_keys.add(key)
 
-                                    # Use BibTexWriter to format the entry
                                     writer = BibTexWriter()
                                     writer.indent = '    '
                                     writer.comma_first = False
@@ -378,10 +348,9 @@ class CitationGenerator:
                                         'bibtex_key': key,
                                         'bibtex_entry': formatted_bibtex
                                     })
-                            except Exception as e:
-                                logger.error(f"Error processing CrossRef item: {e}")  # Replace print with logger
-                                continue
 
+                            except Exception as e:
+                                logger.error(f"Error processing CrossRef item: {e}")
                         return papers
 
                 except aiohttp.ClientError as e:
@@ -393,7 +362,7 @@ class CitationGenerator:
                     await asyncio.sleep(delay)
 
         except Exception as e:
-            logger.error(f"Error searching CrossRef: {e}")  # Replace print with logger
+            logger.error(f"Error searching CrossRef: {e}")
             return []
 
     def _generate_unique_bibtex_key(self, entry: Dict, existing_keys: set) -> str:
@@ -402,18 +371,15 @@ class CitationGenerator:
         year = entry.get('year', '')
         authors = [a.strip() for a in author_field.split(' and ')]
         first_author_last_name = authors[0].split(',')[0] if authors else 'unknown'
-        
+
         if entry_type == 'inbook':
-            # Use 'booktitle' for 'inbook' entries
             booktitle = entry.get('booktitle', '')
             title_word = re.sub(r'\W+', '', booktitle.split()[0]) if booktitle else 'untitled'
         else:
-            # Use regular 'title' for other entries
             title = entry.get('title', '')
             title_word = re.sub(r'\W+', '', title.split()[0]) if title else 'untitled'
-        
+
         base_key = f"{first_author_last_name}{year}{title_word}"
-        # Ensure the key is unique
         key = base_key
         index = 1
         while key in existing_keys:
@@ -422,70 +388,93 @@ class CitationGenerator:
         return key
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int,
-                        use_arxiv: bool = True, use_crossref: bool = True) -> tuple[str, str]:
+                           use_arxiv: bool = True, use_crossref: bool = True) -> tuple[str, str]:
         if not (use_arxiv or use_crossref):
             return "Please select at least one source (ArXiv or CrossRef)", ""
 
         num_queries = min(max(1, num_queries), self.config.max_queries)
         citations_per_query = min(max(1, citations_per_query), self.config.max_citations_per_query)
 
-        queries = await self.generate_queries(text, num_queries)
-        if not queries:
-            return text, ""
+        async def generate_queries_tool(input_data: dict):
+            return await self.generate_queries(input_data["text"], input_data["num_queries"])
 
-        async with self.async_context as session:
-            search_tasks = []
-            for query in queries:
-                if use_arxiv:
-                    search_tasks.append(self.search_arxiv(session, query, citations_per_query))
-                if use_crossref:
-                    search_tasks.append(self.search_crossref(session, query, citations_per_query))
-
-            results = await asyncio.gather(*search_tasks, return_exceptions=True)
-
-        papers = []
-        for r in results:
-            if not isinstance(r, Exception):
-                papers.extend(r)
-
-        unique_papers = []
-        seen_keys = set()
-        for p in papers:
-            if p['bibtex_key'] not in seen_keys:
-                seen_keys.add(p['bibtex_key'])
-                unique_papers.append(p)
-        papers = unique_papers
-
-        if not papers:
-            return text, ""
-
-        try:
-            cited_text = await self.citation_chain.ainvoke({
-                "text": text,
-                "papers": json.dumps(papers, indent=2)
-            })
-
-            # Use bibtexparser to aggregate BibTeX entries
-            bib_database = BibDatabase()
+        async def search_papers_tool(input_data: dict):
+            queries = input_data["queries"]
+            papers = []
+            async with self.async_context as session:
+                search_tasks = []
+                for q in queries:
+                    if input_data["use_arxiv"]:
+                        search_tasks.append(self.search_arxiv(session, q, input_data["citations_per_query"]))
+                    if input_data["use_crossref"]:
+                        search_tasks.append(self.search_crossref(session, q, input_data["citations_per_query"]))
+                results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            for r in results:
+                if not isinstance(r, Exception):
+                    papers.extend(r)
+            # Deduplicate
+            unique_papers = []
+            seen_keys = set()
             for p in papers:
-                if 'bibtex_entry' in p:
-                    bib_db = bibtexparser.loads(p['bibtex_entry'])
-                    if bib_db.entries:
-                        bib_database.entries.append(bib_db.entries[0])
-                    else:
-                        logger.warning(f"Empty BibTeX entry for key: {p['bibtex_key']}")
-            writer = BibTexWriter()
-            writer.indent = '    '
-            writer.comma_first = False
-            bibtex_entries = writer.write(bib_database).strip()
+                if p['bibtex_key'] not in seen_keys:
+                    seen_keys.add(p['bibtex_key'])
+                    unique_papers.append(p)
+            return unique_papers
 
-            return cited_text, bibtex_entries
-        except Exception as e:
-            logger.error(f"Error inserting citations: {e}")  # Replace print with logger
-            return text, ""
+        async def cite_text_tool(input_data: dict):
+            try:
+                citation_input = {
+                    "text": input_data["text"],
+                    "papers": json.dumps(input_data["papers"], indent=2)
+                }
+                prompt = self.citation_prompt.format(**citation_input)
+                response = await self.llm.apredict(prompt)
+                cited_text = response.strip()
+
+                # Aggregate BibTeX entries
+                bib_database = BibDatabase()
+                for p in input_data["papers"]:
+                    if 'bibtex_entry' in p:
+                        bib_db = bibtexparser.loads(p['bibtex_entry'])
+                        if bib_db.entries:
+                            bib_database.entries.append(bib_db.entries[0])
+                        else:
+                            logger.warning(f"Empty BibTeX entry for key: {p['bibtex_key']}")
+                writer = BibTexWriter()
+                writer.indent = '    '
+                writer.comma_first = False
+                bibtex_entries = writer.write(bib_database).strip()
+                return cited_text, bibtex_entries
+            except Exception as e:
+                logger.error(f"Error inserting citations: {e}")
+                return input_data["text"], ""
+
+        async def agent_run(input_data: dict):
+            queries = await generate_queries_tool(input_data)
+            papers = await search_papers_tool({
+                "queries": queries,
+                "citations_per_query": input_data["citations_per_query"],
+                "use_arxiv": input_data["use_arxiv"],
+                "use_crossref": input_data["use_crossref"]
+            })
+            if not papers:
+                return input_data["text"], ""
+            cited_text, final_bibtex = await cite_text_tool({
+                "text": input_data["text"],
+                "papers": papers
+            })
+            return cited_text, final_bibtex
+
+        final_text, final_bibtex = await agent_run({
+            "text": text,
+            "num_queries": num_queries,
+            "citations_per_query": citations_per_query,
+            "use_arxiv": use_arxiv,
+            "use_crossref": use_crossref
+        })
+        return final_text, final_bibtex
 
 def create_gradio_interface() -> gr.Interface:
-    # Removed CitationGenerator initialization here
     async def process(api_key: str, text: str, num_queries: int, citations_per_query: int,
                      use_arxiv: bool, use_crossref: bool) -> tuple[str, str]:
         if not api_key.strip():
@@ -600,12 +589,11 @@ def create_gradio_interface() -> gr.Interface:
 
     with gr.Blocks(css=css, theme=gr.themes.Default()) as demo:
         gr.HTML("""<div class="header">
-<h1>📚 AutoCitation</h1>
-<p>Insert citations into your academic text</p>
-</div>""")
+                <h1>📚 AutoCitation</h1>
+                <p>Insert citations into your academic text</p>
+                </div>""")
 
         with gr.Group(elem_classes="input-group"):
-            # Added API Key input field
             api_key = gr.Textbox(
                 label="Gemini API Key",
                 placeholder="Enter your Gemini API key...",
@@ -623,7 +611,7 @@ def create_gradio_interface() -> gr.Interface:
                         label="Search Queries",
                         value=3,
                         minimum=1,
-                        maximum=5,  # Changed to config.max_queries as 5
+                        maximum=Config.max_queries,
                         step=1
                     )
                 with gr.Column(scale=1):
@@ -631,7 +619,7 @@ def create_gradio_interface() -> gr.Interface:
                         label="Citations per Query",
                         value=1,
                         minimum=1,
-                        maximum=10,  # Changed to config.max_citations_per_query as 10
+                        maximum=Config.max_citations_per_query,
                         step=1
                     )
             
@@ -669,7 +657,6 @@ def create_gradio_interface() -> gr.Interface:
                         show_copy_button=True
                     )
 
-        # Updated the inputs and outputs
         process_btn.click(
             fn=process,
             inputs=[api_key, input_text, num_queries, citations_per_query, use_arxiv, use_crossref],
@@ -679,7 +666,6 @@ def create_gradio_interface() -> gr.Interface:
     return demo
 
 if __name__ == "__main__":
-    # Removed environment variable loading and config initialization
     demo = create_gradio_interface()
     try:
         demo.launch(server_port=7860, share=False)
