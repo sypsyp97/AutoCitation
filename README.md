@@ -6,7 +6,7 @@
 
 > AI-powered academic citation generator
 
-AutoCitation automatically analyzes your text content and generates relevant academic citations from [arXiv](https://arxiv.org/) and [Crossref](https://www.crossref.org/) databases using Google `gemini-1.5-flash`. It then integrates the citations into your text using LaTeX `\cite{}` citation commands and return the cooresponding BibTeX entries.
+AutoCitation is an agent that automatically analyzes your text content and generates relevant academic citations from [arXiv](https://arxiv.org/) and [Crossref](https://www.crossref.org/) databases using Google `gemini-1.5-flash`. It then integrates the citations into your text using LaTeX `\cite{}` citation commands and return the cooresponding BibTeX entries.
 
 ## 🎉 Demo
 
