@@ -11,3 +11,4 @@ tqdm>=4.66.0
 backoff>=2.2.1
 zhipuai>=0.2.0
 bibtexparser>=1.2.0
+langchain>=0.1.0
