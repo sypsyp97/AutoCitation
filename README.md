@@ -3,7 +3,7 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Spaces-yellow.svg)](https://huggingface.co/spaces/yipengsun/AutoCitation)
-
+[![cc-by-nc-shield](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 > AI-powered academic citation generator
 
 AutoCitation is an agent that automatically analyzes your text content and generates relevant academic citations from [arXiv](https://arxiv.org/) and [Crossref](https://www.crossref.org/) databases using Google `gemini-1.5-flash`. It then integrates the citations into your text using LaTeX `\cite{}` citation commands and return the cooresponding BibTeX entries.
@@ -42,4 +42,4 @@ AI can be a powerful tool for finding citations, but it is important to verify t
 
 ## License
 
-This project is open source and available under the [GNU General Public License v3.0 (GPLv3) License](LICENSE).
+This project is open source and available under the [Creative Commons Attribution-NonCommercial 4.0 International License](LICENSE).
