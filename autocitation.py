@@ -678,7 +678,7 @@ def create_gradio_interface() -> gr.Interface:
             )
             queries_text = gr.Textbox(
                 label="Generated Queries",
-                lines=5,
+                lines=10,
                 show_copy_button=True
             )
 
