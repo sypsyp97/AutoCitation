@@ -50,7 +50,7 @@ class ArxivXmlParser:
                     papers.append(paper)
             return papers
         except Exception as e:
-            print(f"Error parsing ArXiv XML: {e}")
+            logger.error(f"Error parsing ArXiv XML: {e}")
             return []
 
     def parse_entry(self, entry) -> Optional[dict]:
@@ -90,7 +90,7 @@ class ArxivXmlParser:
                 'bibtex_entry': bibtex_entry
             }
         except Exception as e:
-            print(f"Error parsing ArXiv entry: {e}")
+            logger.error(f"Error parsing ArXiv entry: {e}")
             return None
 
     @staticmethod
