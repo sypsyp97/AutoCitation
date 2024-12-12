@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import urllib.parse
 import re
 import xml.etree.ElementTree as ET
