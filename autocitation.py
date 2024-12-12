@@ -388,9 +388,9 @@ class CitationGenerator:
         return key
 
     async def process_text(self, text: str, num_queries: int, citations_per_query: int,
-                           use_arxiv: bool = True, use_crossref: bool = True) -> tuple[str, str]:
+                           use_arxiv: bool = True, use_crossref: bool = True) -> tuple[str, str, str]:
         if not (use_arxiv or use_crossref):
-            return "Please select at least one source (ArXiv or CrossRef)", ""
+            return "Please select at least one source (ArXiv or CrossRef)", "", ""
 
         num_queries = min(max(1, num_queries), self.config.max_queries)
         citations_per_query = min(max(1, citations_per_query), self.config.max_citations_per_query)
@@ -449,7 +449,7 @@ class CitationGenerator:
                 logger.error(f"Error inserting citations: {e}")
                 return input_data["text"], ""
 
-        async def agent_run(input_data: dict):
+        async def agent_run(input_data: dict) -> tuple[str, str, str]:
             queries = await generate_queries_tool(input_data)
             papers = await search_papers_tool({
                 "queries": queries,
@@ -458,29 +458,29 @@ class CitationGenerator:
                 "use_crossref": input_data["use_crossref"]
             })
             if not papers:
-                return input_data["text"], ""
+                return input_data["text"], "", "\n".join([f"- {q}" for q in queries])
             cited_text, final_bibtex = await cite_text_tool({
                 "text": input_data["text"],
                 "papers": papers
             })
-            return cited_text, final_bibtex
+            return cited_text, final_bibtex, "\n".join([f"- {q}" for q in queries])
 
-        final_text, final_bibtex = await agent_run({
+        final_text, final_bibtex, final_queries = await agent_run({
             "text": text,
             "num_queries": num_queries,
             "citations_per_query": citations_per_query,
             "use_arxiv": use_arxiv,
             "use_crossref": use_crossref
         })
-        return final_text, final_bibtex
+        return final_text, final_bibtex, final_queries
 
 def create_gradio_interface() -> gr.Interface:
     async def process(api_key: str, text: str, num_queries: int, citations_per_query: int,
-                     use_arxiv: bool, use_crossref: bool) -> tuple[str, str]:
+                     use_arxiv: bool, use_crossref: bool) -> tuple[str, str, str]:
         if not api_key.strip():
-            return "Please enter your Gemini API Key.", ""
+            return "Please enter your Gemini API Key.", "", ""
         if not text.strip():
-            return "Please enter text to process", ""
+            return "Please enter text to process", "", ""
         try:
             config = Config(gemini_api_key=api_key)
             citation_gen = CitationGenerator(config)
@@ -489,9 +489,9 @@ def create_gradio_interface() -> gr.Interface:
                 use_arxiv=use_arxiv, use_crossref=use_crossref
             )
         except ValueError as e:
-            return f"Input validation error: {str(e)}", ""
+            return f"Input validation error: {str(e)}", "", ""
         except Exception as e:
-            return f"Error: {str(e)}", ""
+            return f"Error: {str(e)}", "", ""
 
     css = """
         :root {
@@ -677,11 +677,16 @@ def create_gradio_interface() -> gr.Interface:
                 lines=10,
                 show_copy_button=True
             )
+            queries_text = gr.Textbox(
+                label="Generated Queries",
+                lines=5,
+                show_copy_button=True
+            )
 
         process_btn.click(
             fn=process,
             inputs=[api_key, input_text, num_queries, citations_per_query, use_arxiv, use_crossref],
-            outputs=[cited_text, bibtex]
+            outputs=[cited_text, bibtex, queries_text]
         )
 
     return demo
