@@ -30,6 +30,8 @@ AutoCitation is an agent that automatically analyzes your text content and gener
 
 ## Usage
 
+Use the following command to run the tool:
+
 ```bash
 python autocitation.py
 ```
@@ -39,6 +41,10 @@ This will start a Gradio web interface.
 ## Acknowledgements
 
 AI can be a powerful tool for finding citations, but it is important to verify the results and ensure that the citations are accurate and appropriate. This tool is intended to assist with the citation process, but it is not a substitute for careful research and review of the sources.
+
+## Contributing
+
+Contributions are welcome through pull requests. Feel free to open an issue for bug reports or feature suggestions.
 
 ## License
 
