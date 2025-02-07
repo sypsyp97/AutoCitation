@@ -129,7 +129,7 @@ class CitationGenerator:
         self.xml_parser = ArxivXmlParser()
         self.async_context = AsyncContextManager()
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.0-flash-001",
             temperature=0.3,
             google_api_key=config.gemini_api_key,
             streaming=True
