@@ -163,6 +163,19 @@ class CitationGenerator:
             Text: {text}
             """
         )
+        self.fix_author_prompt = PromptTemplate.from_template(
+            """Fix this author name that contains corrupted characters (�):
+
+            Name: {author}
+
+            Requirements:
+            1. Return ONLY the fixed author name
+            2. Use proper diacritical marks for names
+            3. Consider common name patterns and languages
+            4. If unsure, use the most likely letter
+            5. Maintain the format: "Lastname, Firstname"
+            """
+        )
         logger.remove()
         logger.add(sys.stderr, level=config.log_level)
 
@@ -315,6 +328,41 @@ class CitationGenerator:
             index += 1
         return key
 
+    async def fix_author_name(self, author: str) -> str:
+        """Correct an author name that contains corrupted characters."""
+        if not re.search(r'[�]', author):
+            return author
+        try:
+            prompt = self.fix_author_prompt.format(author=author)
+            response = await self.llm.ainvoke(prompt)
+            fixed_name = response.content.strip()
+            return fixed_name if fixed_name else author
+        except Exception as e:
+            logger.error(f"Error fixing author name: {e}")
+            return author
+
+    async def format_bibtex_author_names(self, papers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Clean and format author names in BibTeX entries of papers."""
+        updated_papers = []
+        for paper in papers:
+            try:
+                bib_database = bibtexparser.loads(paper['bibtex_entry'])
+                for entry in bib_database.entries:
+                    if 'author' in entry:
+                        authors = entry['author'].split(' and ')
+                        cleaned_authors = []
+                        for author in authors:
+                            fixed_author = await self.fix_author_name(author.strip())
+                            cleaned_authors.append(fixed_author)
+                        entry['author'] = ' and '.join(cleaned_authors)
+                writer = get_bibtex_writer()
+                paper['bibtex_entry'] = writer.write(bib_database).strip()
+                updated_papers.append(paper)
+            except Exception as e:
+                logger.error(f"Error cleaning BibTeX author names for paper {paper['bibtex_key']}: {e}")
+                updated_papers.append(paper)  # Append unchanged if error occurs
+        return updated_papers
+
 # --- LangGraph State Definition ---
 
 class State(TypedDict):
@@ -371,7 +419,15 @@ def create_gradio_interface() -> gr.Interface:
                             unique_papers.append(p)
                     return {'papers': unique_papers}
 
+                async def correct_author_names_node(state: State) -> dict:
+                    if not state['papers']:
+                        return {'papers': state['papers']}
+                    corrected_papers = await citation_gen.format_bibtex_author_names(state['papers'])
+                    return {'papers': corrected_papers}
+
                 async def insert_citations_node(state: State) -> dict:
+                    if not state['papers']:
+                        return {'cited_text': state['input_text'], 'bibtex_entries': ""}
                     citation_input = {
                         "text": state['input_text'],
                         "papers": json.dumps(state['papers'], indent=2)
@@ -393,10 +449,12 @@ def create_gradio_interface() -> gr.Interface:
                 graph = StateGraph(State)
                 graph.add_node("generate_queries", generate_queries_node)
                 graph.add_node("search_papers", search_papers_node)
+                graph.add_node("correct_author_names", correct_author_names_node)
                 graph.add_node("insert_citations", insert_citations_node)
                 graph.set_entry_point("generate_queries")
                 graph.add_edge("generate_queries", "search_papers")
-                graph.add_edge("search_papers", "insert_citations")
+                graph.add_edge("search_papers", "correct_author_names")
+                graph.add_edge("correct_author_names", "insert_citations")
                 graph.add_edge("insert_citations", END)
                 compiled_graph = graph.compile()
 
